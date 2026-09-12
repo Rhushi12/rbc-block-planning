@@ -7,7 +7,9 @@ departments are planned independently today. This prototype unifies them against
 corridor availability, ranks them with a trained priority model, and packs them into the
 fewest safe possessions over a day, a week or a month.
 
-Runs entirely locally. No login, no API keys, no package installation, no network calls.
+Runs entirely locally. No login, no API keys, no package installation, nothing leaves the
+machine. The planner makes no network calls at all. An optional language assistant talks to
+a model running on the same machine and is absent unless you start one.
 
 ## Start
 
@@ -18,6 +20,16 @@ npm start          # http://127.0.0.1:5173
 npm test           # 42 tests
 npm run check      # syntax check every module
 ```
+
+Optional, for the language assistant only:
+
+```sh
+ollama serve                      # if it is not already running
+ollama pull qwen2.5:7b-instruct   # any Qwen build works; 3b is fine on a thin laptop
+```
+
+`OLLAMA_MODEL`, `OLLAMA_HOST` and `OLLAMA_TIMEOUT_MS` override the defaults. With no model
+running, the assistant controls do not appear and everything else behaves identically.
 
 ## What the problem statement asks for, and where it lives
 
@@ -198,6 +210,36 @@ None of these bypass the gate. Each one re-runs it.
 - **Traffic cost is visible.** Corridor blocks carry the number of trains regulated, on the
   card and again in the approval dialog.
 
+## The language assistant, and the line it does not cross
+
+A local model — Qwen through Ollama, on the same machine — does four things, and the rule
+behind all four is that **it touches language, never arithmetic and never the gate**:
+
+| It does | It does not |
+| --- | --- |
+| Read a defect note into a **draft** work order | Rank anything |
+| Put a computed refusal or deferral into plain words | Choose a window |
+| Draft a possession notice from figures it was handed | Validate anything |
+| Answer questions from the computed plan | Reach state without a person acting |
+
+That line is the point, not a limitation. The priority score decomposes exactly because the
+model behind it is linear; the plan is reproducible because the search is deterministic. A
+language model doing either of those jobs would cost both properties and buy nothing. Doing
+the jobs it is actually good at costs neither.
+
+So the intake reads a sentence a permanent way inspector would really write — *rail fracture
+near km 42 on the up line between Anand and Nadiad, needs ultrasonic testing before the next
+shift* — and fills the form. It states what it inferred rather than read, it reports its own
+confidence, and the draft is run past the same intake validation a typed form faces. **It fills
+the form; the controller files the work order.** Nothing the model writes enters state on its own.
+
+The three writing tasks are given computed facts and told to use nothing else. `ask` is given a
+context built from the plan the planner produced — blocks, deferrals, summary figures — and
+instructed to say it does not know rather than guess.
+
+Everything here is optional and feature-detected. No daemon, no model, no controls; the planner
+neither knows nor cares.
+
 ## Planning API
 
 The planner and the safety gate are plain modules, so the same code the browser runs is served
@@ -215,6 +257,11 @@ over HTTP.
 | `POST /api/approve` | Validate and commit one block |
 | `POST /api/withdraw` | Withdraw a committed block and return its work orders |
 | `POST /api/revalidate` | Re-run the gate over the schedule, optionally against delayed traffic |
+| `GET /api/assist/health` | Whether a local model is reachable, and which one |
+| `POST /api/assist/intake` | Read a defect note into a draft work order |
+| `POST /api/assist/explain` | Put a computed refusal or deferral into plain words |
+| `POST /api/assist/notice` | Draft a possession notice from an approved block |
+| `POST /api/assist/ask` | Answer a question from the computed plan |
 
 ```sh
 curl -s -X POST http://127.0.0.1:5173/api/plan -d '{"horizon":"week"}'
@@ -236,7 +283,9 @@ dist/data.js            reference data, time and horizon helpers, block arithmet
 dist/safety.js          the hard-rule gate and atomic approval
 dist/planner.js         free-window search, objective, horizon planning
 dist/app.js             interface
+dist/assist.js          browser side of the assistant: probe, call, deadline
 server.mjs              static server and planning API, loopback only
+assist.mjs              prompts and the Ollama client; optional, never in the planning path
 tools/build_corridor.py rebuilds the corridor from the DataMeet dataset
 tools/build_backlog.py  regenerates the backlog and refits the priority model
 tests/planner.test.mjs  42 tests
@@ -261,6 +310,10 @@ This is not railway control software.
 - **Approval is a demonstration acknowledgement**, not authenticated authority. It is
   reversible and audited, but the name typed into the dialogue is not verified against
   anything. State lives in one browser's localStorage. Not multi-user, not a system of record.
+- **The assistant is a drafting aid.** It runs locally and is given controlled vocabularies and
+  computed facts, but it is a language model: it can still word something badly or miss a
+  nuance in a note. Every draft is reviewed by a person before it becomes anything, and it has
+  no path to the ranking, the search, the gate or the schedule.
 - **Grouping is greedy**, not optimal. It is deterministic and explainable and does not claim
   global optimality; a constraint solver would do better on the packing.
 - **Not modelled:** temporary speed restrictions after work, gang and machinery travel between

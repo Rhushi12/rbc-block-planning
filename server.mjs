@@ -4,8 +4,10 @@ import path from 'node:path';
 import {demo,trains,sections,corridorWindows,assets,departments,resources,
         priorityOf,band,HORIZONS,delayed} from './dist/data.js';
 import {optimize,search,freeIntervals,trainsAffected} from './dist/planner.js';
-import {validateBlock,approveBlock,withdrawBlock,revalidateSchedule} from './dist/safety.js';
+import {validateBlock,validateRequest,approveBlock,withdrawBlock,
+        revalidateSchedule} from './dist/safety.js';
 import {explain,FEATURES,RMSE,TRAINED_ON} from './dist/priority-model.js';
+import * as assist from './assist.mjs';
 
 const root=path.resolve('dist');
 const port=Number(process.env.PORT)||5173;
@@ -105,6 +107,40 @@ const api={
    safe:conflicts.length===0,
    conflicts:conflicts.map(c=>({block:c.block.id,date:c.block.date,section:c.block.section,
      start:c.block.start,end:c.block.end,errors:c.errors}))};},
+
+ // ---- local language assistant ------------------------------------------
+ // Optional. Drafts, wording and answers only: it never ranks, never chooses a
+ // window and never validates. Absent Ollama these report why and the UI hides.
+ 'GET /api/assist/health':()=>assist.health(),
+
+ // A sentence in, a DRAFT work order out, already run past the same intake
+ // validation a typed form would face. Nothing is added to the backlog here.
+ 'POST /api/assist/intake':async input=>{
+  const state=readState(input);
+  const out=await assist.intake(input.text);
+  const candidate={id:'DRAFT',asset:'MANUAL',defect:out.draft.severity?'Reported on intake':null,
+   criticality:0.8,traffic:0.6,status:'Pending',...out.draft};
+  return {...out,errors:validateRequest(candidate,state)};},
+
+ // Puts an already-computed refusal or deferral into a controller's words.
+ 'POST /api/assist/explain':async input=>{
+  const kind=input.kind==='rejection'?'rejection':'deferral';
+  const facts=String(input.facts||'').slice(0,4000);
+  if(!facts.trim())throw new Error('Provide the recorded reason to put into words.');
+  return assist.explain(kind,facts);},
+
+ // A possession notice written from figures the planner computed.
+ 'POST /api/assist/notice':async input=>{
+  const state=readState(input);
+  if(!input.block||!Array.isArray(input.block.taskIds))throw new Error('Provide a block with taskIds.');
+  const tasks=input.block.taskIds.map(id=>state.requests.find(r=>r.id===id)).filter(Boolean);
+  if(!tasks.length)throw new Error('That block names no work orders in this state.');
+  return assist.notice(input.block,tasks);},
+
+ // Questions answered strictly from the computed plan, or refused.
+ 'POST /api/assist/ask':async input=>{
+  const state=readState(input);
+  return assist.ask(input.question,assist.context(state,input.result));},
 };
 
 http.createServer(async(req,res)=>{
@@ -113,7 +149,7 @@ http.createServer(async(req,res)=>{
   const route=`${req.method} ${url.pathname}`;
   const handler=api[route];
   if(!handler)return send(res,404,{error:`Unknown endpoint ${route}.`,endpoints:Object.keys(api)});
-  try{return send(res,200,handler(req.method==='POST'?await readBody(req):{}));}
+  try{return send(res,200,await handler(req.method==='POST'?await readBody(req):{}));}
   catch(e){return send(res,400,{error:e.message});}
  }
  try{

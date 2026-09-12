@@ -4,6 +4,7 @@ import {demo,sections,lines,trains,corridorWindows,departments,resources,assets,
 import {validateBlock,validateRequest,approveBlock,overlaps,withdrawBlock,revalidateSchedule} from './safety.js';
 import {optimize,freeIntervals,trainsAffected,separateMinutes,legIndex,search} from './planner.js';
 import {explain,FEATURES,RMSE,TRAINED_ON} from './priority-model.js';
+import {assist,probeAssist,callAssist} from './assist.js';
 
 const key='rbc-v3';
 let state,storageWarning='';
@@ -19,6 +20,20 @@ retime();
 let page='Dashboard',horizon='day',result=null,notice=storageWarning,issues=[],
     filter='',deptFilter='',modal='',expanded=null;
 
+// The assistant is language only. Nothing it writes enters state on its own:
+// a draft fills a form the controller submits, and prose is prose.
+let assistBusy='',assistText={},assistDraft=null,assistNoteText='',
+    assistQuestion='',assistAnswer=null;
+const assistOut=(t,model)=>`<div class="assist-out">
+ <span class="assist-tag">${esc(model||'local model')} · drafted, not checked</span>
+ <p>${esc(t)}</p></div>`;
+async function runAssist(busy,fn){
+ assistBusy=busy;render();
+ try{await fn();}
+ catch(e){issues=[{message:e.message}];}
+ finally{assistBusy='';render();}
+}
+
 const pages=['Dashboard','Block Plan','Maintenance Backlog','Corridor & Traffic',
              'Departments','Approved Schedule','Safety Alerts'];
 const icon=['▦','◷','☷','⇄','▤','✓','◇'];
@@ -26,6 +41,7 @@ const icon=['▦','◷','☷','⇄','▤','✓','◇'];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const pending=()=>state.requests.filter(r=>r.status==='Pending');
 const taskOf=id=>state.requests.find(r=>r.id===id);
+const snapshot=()=>{const {trains:_t,...rest}=state;return rest;};
 const tasksFor=b=>b.taskIds.map(taskOf).filter(Boolean);
 const lineLabel=l=>l===null?'Both lines':`${l} line`;
 const bandKind=b=>({Critical:'red',High:'amber',Medium:'blue',Low:'neutral'}[b]||'');
@@ -182,7 +198,18 @@ function blockPlan(){
     `<tr><td><strong>${esc(u.title)}</strong><small>${esc(u.id)} · ${esc(deptLabel(u.department))}</small></td>
      <td>${esc(section(u.section).code)}<small>${esc(lineLabel(u.line))}</small></td>
      <td class="num">${requiredMinutes([u])} min</td>
-     <td><small>${esc(u.reason)}</small></td></tr>`))}</section>`:''}`;
+     <td><small>${esc(u.reason)}</small>
+      ${assist.ready?`<button class="text" data-defer="${esc(u.id)}" ${assistBusy==='defer:'+u.id?'disabled':''}>
+        ${assistBusy==='defer:'+u.id?'Writing…':'In plain words'}</button>`:''}
+      ${assistText['defer:'+u.id]?assistOut(assistText['defer:'+u.id].text,assistText['defer:'+u.id].model):''}</td></tr>`))}</section>`:''}
+ ${assist.ready?`<section class="panel"><div class="panel-head"><div><h2>Ask the plan</h2>
+   <p>Answered only from what the planner computed, by ${esc(assist.model)} running on this machine.</p></div></div>
+  <form class="form-body" data-ask="1">
+   <label>Question<input name="question" id="askq" maxlength="500" required
+     placeholder="e.g. why was the deep screening work deferred?" value="${esc(assistQuestion)}"></label>
+   <button type="submit" ${assistBusy==='ask'?'disabled':''}>${assistBusy==='ask'?'Thinking…':'Ask'}</button></form>
+  ${assistAnswer?assistOut(assistAnswer.text,assistAnswer.model):''}
+  <div class="panel-foot">It answers from the computed plan or says it does not know. It cannot rank, schedule or approve anything.</div></section>`:''}`;
 }
 
 // ------------------------------------------------------------------ backlog
@@ -299,7 +326,8 @@ function schedulePage(){
     <td class="num">${time(b.start)}–${time(b.end)}<small>${b.end-b.start} min</small></td>
     <td>${b.taskIds.length} order${b.taskIds.length>1?'s':''}<small>${esc(tasksFor(b).map(t=>t.title).join(' · ').slice(0,64))}</small></td>
     <td>${esc(b.approvedBy)}<small>${esc(String(b.createdAt).slice(0,16).replace('T',' '))}</small></td>
-    <td><button class="text" data-withdraw="${esc(b.id)}">Withdraw</button></td></tr>`))}</section>
+    <td>${assist.ready?`<button class="text" data-notice="${esc(b.id)}" ${assistBusy==='notice:'+b.id?'disabled':''}>${assistBusy==='notice:'+b.id?'Writing…':'Notice'}</button>`:''}
+     <button class="text" data-withdraw="${esc(b.id)}">Withdraw</button></td></tr>`))}</section>
  ${state.blocks.length?'':'<div class="empty-state"><h2>Nothing approved yet.</h2><p>Generate a block plan and approve a window to populate the schedule.</p><button data-page="Block Plan">Open block plan</button></div>'}`;
 }
 
@@ -322,19 +350,40 @@ const options=(items,value,labelOf=x=>x,valueOf=x=>x)=>
 function modalContent(){
  if(!modal)return '';
  let c='';
- if(modal==='request')c=`<h2>Raise a work order</h2>
-  <label>Activity<input name="title" required maxlength="120" placeholder="e.g. Ultrasonic rail flaw testing"></label>
+ if(modal==='request'){
+  const d=assistDraft?.draft||{};
+  c=`<h2>Raise a work order</h2>
+  ${assist.ready?`<div class="assist-box">
+   <label>Defect note<textarea name="note" id="note" rows="3"
+     placeholder="e.g. rail fracture reported near km 42 on the up line between Anand and Nadiad, needs ultrasonic testing before the next shift">${esc(assistNoteText)}</textarea></label>
+   <div class="assist-row">
+    <button type="button" data-action="read-note" ${assistBusy==='intake'?'disabled':''}>
+     ${assistBusy==='intake'?'Reading\u2026':'Read the note'}</button>
+    <small>${esc(assist.model)} fills the form below. It never files the work order \u2014 you do.</small></div>
+   ${assistDraft?`<div class="assist-out">
+     <span class="assist-tag">${esc(assistDraft.model)} \u00b7 confidence ${esc(assistDraft.confidence)}</span>
+     ${assistDraft.assumptions.length
+       ?`<ul>${assistDraft.assumptions.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>`
+       :'<p>Nothing was inferred beyond what the note says.</p>'}
+     ${assistDraft.errors?.length?`<div class="err">${assistDraft.errors.map(e=>`<p>${esc(e)}</p>`).join('')}</div>`:''}
+    </div>`:''}</div>`:''}
+  <label>Activity<input name="title" required maxlength="120" value="${esc(d.title||'')}" placeholder="e.g. Ultrasonic rail flaw testing"></label>
   <div class="form-grid">
-   <label>Section<select name="section">${options(sections,null,s=>s.name,s=>s.id)}</select></label>
-   <label>Running line<select name="line"><option value="UP">UP</option><option value="DN">DN</option><option value="">Both (section-wide)</option></select></label>
-   <label>Department<select name="department">${options(departments,null,d=>`${d.label} (${d.system})`,d=>d.code)}</select></label>
-   <label>Machinery<select name="resource"><option>None</option>${options(resources)}</select></label>
-   <label>Work minutes<input name="duration" type="number" min="5" max="480" value="45" required></label>
-   <label>Periodicity (days)<input name="periodicity" type="number" min="1" max="3650" value="90" required></label>
-   <label>Days overdue<input name="overdueDays" type="number" min="-365" max="999" value="0" required></label>
-   <label>Defect severity<select name="severity"><option value="0">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></label></div>
-  <label class="check"><input name="emergency" type="checkbox"> Emergency &mdash; plan ahead of the model ranking</label>
+   <label>Section<select name="section">${options(sections,d.section??null,s=>s.name,s=>s.id)}</select></label>
+   <label>Running line<select name="line">
+     <option value="UP" ${d.line==='UP'?'selected':''}>UP</option>
+     <option value="DN" ${d.line==='DN'?'selected':''}>DN</option>
+     <option value="" ${assistDraft&&d.line===null?'selected':''}>Both (section-wide)</option></select></label>
+   <label>Department<select name="department">${options(departments,d.department??null,x=>`${x.label} (${x.system})`,x=>x.code)}</select></label>
+   <label>Machinery<select name="resource">${['None',...resources].map(r=>`<option ${d.resource===r?'selected':''}>${esc(r)}</option>`).join('')}</select></label>
+   <label>Work minutes<input name="duration" type="number" min="5" max="480" value="${d.duration??45}" required></label>
+   <label>Periodicity (days)<input name="periodicity" type="number" min="1" max="3650" value="${d.periodicity??90}" required></label>
+   <label>Days overdue<input name="overdueDays" type="number" min="-365" max="999" value="${d.overdueDays??0}" required></label>
+   <label>Defect severity<select name="severity">${[0,1,2,3,4].map(v=>
+     `<option value="${v}" ${Number(d.severity??0)===v?'selected':''}>${v||'None'}</option>`).join('')}</select></label></div>
+  <label class="check"><input name="emergency" type="checkbox" ${d.emergency?'checked':''}> Emergency &mdash; plan ahead of the model ranking</label>
   <button class="primary" type="submit">Add to backlog</button>`;
+ }
  if(modal.startsWith('approve:')){
   const p=result.plans[Number(modal.split(':')[1])];
   const regulated=p.corridor?trainsAffected(p,state):0;
@@ -346,6 +395,13 @@ function modalContent(){
    <label>Approving controller<input name="controller" maxlength="80" required placeholder="Name and designation"></label>
    <label class="check"><input type="checkbox" required> I have reviewed this demonstration block.</label>
    <button class="primary" type="submit">Confirm approval</button>`;
+ }
+ if(modal.startsWith('notice:')){
+  const t=assistText[modal];
+  c=`<h2>Possession notice</h2>
+   <p>Written by ${esc(t?.model||'a local model')} from the figures on the approved block, nothing else. Read it before it goes anywhere.</p>
+   <label>Notice<textarea readonly rows="7">${esc(t?.text||'')}</textarea></label>
+   <label>The figures it was given<textarea readonly rows="7">${esc(t?.facts||'')}</textarea></label>`;
  }
  if(modal.startsWith('withdraw:')){
   const b=state.blocks.find(x=>x.id===modal.slice(9));
@@ -386,6 +442,8 @@ function render(){
      <span aria-hidden="true">${icon[i]}</span>${p}${p==='Safety Alerts'&&state.alerts.length?`<b>${state.alerts.length}</b>`:''}</button>`).join('')}</nav>
    <div class="side-foot"><div class="tag">DEMONSTRATION MODE</div>
     <p>SIH26027 · Ministry of Railways<br>Local planning sandbox</p>
+    ${assist.checked?`<div class="assist-chip ${assist.ready?'on':''}" title="${esc(assist.ready?`${assist.model} answering locally`:assist.reason)}">
+      ${assist.ready?`◆ ${esc(assist.model)}`:'◇ no local model'}</div>`:''}
     <button data-modal="reset">↻ Reset data</button></div></aside>
   <div class="shell">
    <header><div>Operations <span>/</span> <strong>${esc(page)}</strong></div>
@@ -394,7 +452,10 @@ function render(){
    <main>
     ${notice?`<div class="notice" role="status">${esc(notice)}<button data-action="dismiss" aria-label="Dismiss">×</button></div>`:''}
     ${issues.length?`<div class="err block" role="alert"><strong>Safety gate blocked this action</strong>
-      ${issues.map(e=>`<p>${esc(e.message||e)}</p>`).join('')}</div>`:''}
+      ${issues.map(e=>`<p>${esc(e.message||e)}</p>`).join('')}
+      ${assist.ready?`<button class="text" data-action="explain-issues" ${assistBusy==='issues'?'disabled':''}>
+        ${assistBusy==='issues'?'Writing…':'Put this in plain words'}</button>`:''}
+      ${assistText.issues?assistOut(assistText.issues.text,assistText.issues.model):''}</div>`:''}
     ${body()}</main>
    <footer><span class="shield">◇</span>AI ranks and packs. Hard rules and authorised human approval have final say.
     <span>PROTOTYPE · NOT FOR RAILWAY CONTROL</span></footer></div>
@@ -431,6 +492,23 @@ document.addEventListener('click',e=>{
  if(el.dataset.dept!==undefined&&!el.closest('form')){deptFilter=el.dataset.dept;render();return;}
  if(el.dataset.explain){expanded=expanded===el.dataset.explain?null:el.dataset.explain;render();return;}
  if(el.dataset.withdraw){modal='withdraw:'+el.dataset.withdraw;issues=[];render();return;}
+ if(el.dataset.defer){
+  const id=el.dataset.defer,u=result?.unplaced.find(x=>x.id===id);
+  if(!u)return;
+  runAssist('defer:'+id,async()=>{
+   const facts=`Work order ${u.id} "${u.title}" for ${deptLabel(u.department)} on ${sectionName(u.section)}, ${lineLabel(u.line)}. `+
+    `It needs ${requiredMinutes([u])} minutes including protection and clearance. `+
+    `Deferral kind: ${u.deferral}. Recorded reason: ${u.reason}`;
+   assistText['defer:'+id]=await callAssist('explain',{kind:'deferral',facts});});
+  return;}
+ if(el.dataset.notice){
+  const id=el.dataset.notice,b=state.blocks.find(x=>x.id===id);
+  if(!b)return;
+  runAssist('notice:'+id,async()=>{
+   assistText['notice:'+id]=await callAssist('notice',
+    {block:{...b,trainsRegulated:trainsAffected(b,state)},state:snapshot()});
+   modal='notice:'+id;});
+  return;}
  if(el.dataset.replan!==undefined){
   const i=Number(el.dataset.replan),p=result.plans[i];
   const want=minutes(document.querySelector('#prefer-'+i)?.value||'');
@@ -452,8 +530,22 @@ document.addEventListener('click',e=>{
   modal='approve:'+i;render();return;}
  const a=el.dataset.action;
  if(a==='plan')generate();
+ if(a==='read-note'){
+  assistNoteText=document.querySelector('#note')?.value||'';
+  if(!assistNoteText.trim()){issues=[{message:'Type the defect note first.'}];render();return;}
+  runAssist('intake',async()=>{
+   assistDraft=await callAssist('intake',{text:assistNoteText,state:snapshot()});
+   notice=assistDraft.errors?.length
+    ?'Draft filled in, but it does not pass intake validation yet. Correct the fields below.'
+    :`Draft filled in by ${assistDraft.model}. Check every field, then add it yourself.`;});
+  return;}
+ if(a==='explain-issues'){
+  const facts=issues.map(e=>e.message||e).join('\n');
+  runAssist('issues',async()=>{
+   assistText.issues=await callAssist('explain',{kind:'rejection',facts});});
+  return;}
  if(a==='dismiss'){notice='';render();}
- if(a==='close'){modal='';render();}
+ if(a==='close'){modal='';assistDraft=null;assistNoteText='';render();}
  if(a==='export'){modal='export';render();}
  if(a==='clear-delays'){state.delays=[];retime();result=null;save();
   notice='Running delays cleared. The plan is back on the booked timetable.';render();}
@@ -497,6 +589,13 @@ document.addEventListener('submit',e=>{
    result=null;save();notice=`${deptLabel(d)} updated. Generate the plan again to use it.`;}
   issues=errors.map(m=>({message:m}));render();return;}
 
+ if(form.dataset.ask){
+  assistQuestion=String(data.question||'').trim();
+  if(!assistQuestion){issues=[{message:'Type a question first.'}];render();return;}
+  runAssist('ask',async()=>{
+   assistAnswer=await callAssist('ask',{question:assistQuestion,state:snapshot(),result});});
+  return;}
+
  if(form.dataset.delay){
   const m=Number(data.minutes);
   if(!Number.isInteger(m)||m<5||m>240)errors.push('A delay must be a whole number of minutes from 5 to 240.');
@@ -521,7 +620,7 @@ document.addEventListener('submit',e=>{
    defect:Number(data.severity)?'Reported on intake':null,severity:Number(data.severity),
    criticality:0.8,traffic:0.6,emergency:data.emergency==='on',status:'Pending'};
   errors=validateRequest(r,state);
-  if(!errors.length){state.requests.push(r);result=null;
+  if(!errors.length){state.requests.push(r);result=null;assistDraft=null;assistNoteText='';
    notice=r.emergency
     ?`${r.id} raised as an emergency. It is placed ahead of the model ranking — generate the plan again.`
     :`${r.id} added to the backlog.`;}}
@@ -543,6 +642,7 @@ document.addEventListener('submit',e=>{
    notice=`Block withdrawn. ${out.returned.length} work order${out.returned.length===1?'':'s'} back on the backlog.`;}}
 
  if(modal==='reset'){state=demo();retime();result=null;issues=[];
+  assistText={};assistDraft=null;assistNoteText='';assistAnswer=null;assistQuestion='';
   page='Dashboard';history.replaceState(null,'','#Dashboard');notice='Reference data restored.';}
 
  if(errors.length){document.querySelector('#form-error').innerHTML=errors.map(x=>`<p>${esc(x)}</p>`).join('');return;}
@@ -555,3 +655,6 @@ window.addEventListener('hashchange',()=>{
  if(pages.includes(p)){page=p;render();}
 });
 render();
+// Ask once whether a local model is behind this page. If not, every assistant
+// control stays hidden and the planner carries on exactly as before.
+probeAssist().then(render);
