@@ -1,0 +1,2 @@
+asset_id,cycle_start,cycle_end,periodicity_days,traffic_density,asset_class,defect_found
+A0001,2026-03-01,2026-06-24,90,1.0,Rail,1

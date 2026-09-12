@@ -29,7 +29,9 @@ register and refit.
     python tools/build_weights.py
 """
 
-import json, io, os, math, random
+import json, io, os, math, random, argparse, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import real_records
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, '..', 'dist')
@@ -105,20 +107,47 @@ def candidates(rng):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--records', metavar='DIR',
+                    help='fit to a real sanctioned block register instead of '
+                         'generated choices (see tools/real_records.py)')
+    args = ap.parse_args()
+
     rng = random.Random(SEED)
     truth = [TRUTH[n] for n in NAMES]
-
     sets = []
-    for _ in range(SETS):
-        opts = candidates(rng)
-        probs = softmax([utility(truth, f) / BETA for f in opts])
-        pick, acc, roll = 0, 0.0, rng.random()
-        for i, p in enumerate(probs):
-            acc += p
-            if roll <= acc:
-                pick = i
-                break
-        sets.append((opts, pick))
+
+    if args.records:
+        # A division's block register already records which window was
+        # sanctioned out of those on offer, which makes this the easiest of the
+        # three models to put on real data.
+        try:
+            loaded = real_records.validate(args.records, ['windows.csv'])
+        except real_records.RecordError as e:
+            print('This extract does not meet the contract:\n%s' % e)
+            raise SystemExit(1)
+        groups = {}
+        for r in loaded['windows.csv']:
+            groups.setdefault(r['choice_set_id'], []).append(r)
+        for sid in sorted(groups):
+            rows = groups[sid]
+            opts = [[float(r['clearance_min']), float(r['minutes_into_day']),
+                     float(r['trains_regulated'])] for r in rows]
+            pick = next(i for i, r in enumerate(rows) if r['chosen'].strip() == '1')
+            sets.append((opts, pick))
+        rng.shuffle(sets)
+        print('fitting to %d recorded choices from %s' % (len(sets), args.records))
+    else:
+        for _ in range(SETS):
+            opts = candidates(rng)
+            probs = softmax([utility(truth, f) / BETA for f in opts])
+            pick, acc, roll = 0, 0.0, rng.random()
+            for i, p in enumerate(probs):
+                acc += p
+                if roll <= acc:
+                    pick = i
+                    break
+            sets.append((opts, pick))
 
     cut = int(0.8 * len(sets))
     train, test = sets[:cut], sets[cut:]

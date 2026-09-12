@@ -148,8 +148,31 @@ corridor — pins it down.
 Only ratios are identified in a conditional logit, so the weights are normalised to
 `headroom = 1`, which is also the planner's unit: minutes.
 
-**All three histories are synthetic.** The feature sets, the fitting procedures and the
-inference paths are the deliverable; point them at real records and refit.
+### Pointing them at real records
+
+"Point them at real records and refit" is a claim, so it is wired up rather than asserted.
+`tools/real_records.py` states the contract a division's extract has to meet, validates one
+against it line by line, and hands the fitting code the same shapes the generator does.
+
+```sh
+python tools/real_records.py --template tools/records   # blank templates to fill in
+python tools/real_records.py --check tools/records      # validate an extract
+python tools/build_backlog.py --records tools/records   # refit hazard + priority
+python tools/build_weights.py --records tools/records   # refit the objective
+```
+
+Three files carry the three training sets, and they are not equally hard to obtain:
+
+| File | Feeds | How hard to get |
+| --- | --- | --- |
+| `windows.csv` | the planner objective | **Easiest.** A sanctioned block register already records which window was granted out of those on offer. |
+| `decisions.csv` | the priority model | Moderate. Any consistent internal priority scale works; it is rescaled during the fit. |
+| `cycles.csv` | the hazard model | **Hardest, and the one that matters.** One row per completed cycle and whether a reportable defect was found. It is a record of what actually broke, and it cannot be generated honestly. |
+
+The validator reports every problem it finds at once rather than stopping at the first,
+refuses a cycles file whose outcomes are all identical, and warns when there are too few
+cycles to trust a hazard model. **All three histories shipped here are synthetic** — the
+feature sets, the fitting procedures and this ingestion path are the deliverable.
 
 ## How a window is chosen
 
@@ -338,6 +361,8 @@ assist.mjs              prompts and the Ollama client; optional, never in the pl
 tools/build_corridor.py rebuilds the corridor from the DataMeet dataset
 tools/build_backlog.py  regenerates the backlog, refits the hazard and priority models
 tools/build_weights.py  refits the planner objective from recorded window choices
+tools/real_records.py   the contract a real TMS/SMMS/TDMS extract must meet, and its validator
+tools/records-template/ blank CSVs a division can fill in
 tests/planner.test.mjs  49 tests over the planner, the gate and the models
 tests/render.test.mjs   4 tests that render the interface without a browser
 ```
@@ -353,7 +378,8 @@ This is not railway control software.
   practice, but the defects, dates and durations are generated. All three models — hazard,
   priority and the planner objective — are fitted to synthetic history. Their reported
   figures (AUC 0.774, RMSE 4.6, 77% choice agreement) measure the procedures recovering a
-  process we generated, not performance against railway reality.
+  process we generated, not performance against railway reality. `tools/real_records.py`
+  is the path out of this, not a fix for it.
 - **The timetable is real but static.** No live feed from the Control Office Application:
   delays are entered by hand to test a plan against traffic that is not running to book,
   not received from NTES or COA. Every booked path is treated as occupied — the

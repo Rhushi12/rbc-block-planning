@@ -1,0 +1,2 @@
+asset_id,section_id,line,activity,department,asset_class,periodicity_days,last_done,criticality
+A0001,S1,UP,Ultrasonic rail flaw testing,ENGG,Rail,90,2026-06-24,0.95

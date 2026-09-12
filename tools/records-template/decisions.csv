@@ -1,0 +1,2 @@
+decision_id,overdue_days,periodicity_days,severity,criticality,traffic_density,assigned_priority
+D0001,42,90,2,0.95,1.0,78

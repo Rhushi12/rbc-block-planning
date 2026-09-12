@@ -11,7 +11,9 @@ Swap the generator for a TMS/SMMS/TDMS extract and nothing downstream changes.
 
 Run:  python tools/build_backlog.py
 """
-import json, io, os, math, random, datetime
+import json, io, os, math, random, datetime, argparse, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import real_records
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, '..', 'dist')
@@ -118,6 +120,21 @@ def load_corridor():
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--records', metavar='DIR',
+                    help='fit the hazard and priority models to a real extract '
+                         'instead of generated history (see tools/real_records.py)')
+    args = ap.parse_args()
+    records = None
+    if args.records:
+        try:
+            records = real_records.validate(args.records,
+                                            ['cycles.csv', 'decisions.csv'])
+        except real_records.RecordError as e:
+            print('This extract does not meet the contract:\n%s' % e)
+            raise SystemExit(1)
+        print('fitting to real records from %s' % args.records)
+
     rng = random.Random(SEED)
     sections, trains = load_corridor()
 
@@ -189,13 +206,25 @@ def main():
     h_true = [1.35, 0.80, 0.95, 1.60]
     h_b0 = -4.80
     h_rows = []
-    for _ in range(6000):
-        wear = rng.triangular(0.1, 2.4, 0.9)
-        traffic = rng.uniform(0.15, 1.0)
-        fragility = rng.choice(list(FRAGILITY.values()))
-        x = hfeatures(wear, traffic, fragility)
-        z = h_b0 + sum(c * v for c, v in zip(h_true, x)) + rng.gauss(0, 0.45)
-        h_rows.append((x, 1 if rng.random() < 1.0 / (1.0 + math.exp(-z)) else 0))
+    if records:
+        # One row per completed cycle, and whether it ended with a reportable
+        # defect. This is the set nobody can generate honestly.
+        for r in records['cycles.csv']:
+            span = (datetime.date.fromisoformat(r['cycle_end'])
+                    - datetime.date.fromisoformat(r['cycle_start'])).days
+            wear = span / max(int(r['periodicity_days']), 1)
+            x = hfeatures(wear, float(r['traffic_density']),
+                          FRAGILITY.get(r['asset_class'], 0.5))
+            h_rows.append((x, int(r['defect_found'])))
+        rng.shuffle(h_rows)
+    else:
+        for _ in range(6000):
+            wear = rng.triangular(0.1, 2.4, 0.9)
+            traffic = rng.uniform(0.15, 1.0)
+            fragility = rng.choice(list(FRAGILITY.values()))
+            x = hfeatures(wear, traffic, fragility)
+            z = h_b0 + sum(c * v for c, v in zip(h_true, x)) + rng.gauss(0, 0.45)
+            h_rows.append((x, 1 if rng.random() < 1.0 / (1.0 + math.exp(-z)) else 0))
 
     cut = int(0.8 * len(h_rows))
     h_train, h_test = h_rows[:cut], h_rows[cut:]
@@ -263,7 +292,25 @@ def main():
     # noise standing in for judgement the features do not capture.
     truth = [18.0, 20.0, 24.0, 16.0]
     hist = []
-    for _ in range(4000):
+    if records:
+        # How work was actually ordered. The recorded priority is put on a
+        # 0-100 scale by its own observed spread, so a division can hand over
+        # whatever scale it already uses.
+        raw = [float(r['assigned_priority']) for r in records['decisions.csv']]
+        lo_p, hi_p = min(raw), max(raw)
+        span = (hi_p - lo_p) or 1.0
+        for r, y in zip(records['decisions.csv'], raw):
+            d = {'overdueDays': int(r['overdue_days']),
+                 'periodicity': int(r['periodicity_days']),
+                 'severity': int(r['severity']),
+                 'criticality': float(r['criticality']),
+                 'traffic': float(r['traffic_density'])}
+            d['risk'] = hprob(hfeatures(
+                max(0.0, d['overdueDays']) / max(d['periodicity'], 1) + 1.0,
+                d['traffic'], 0.65))
+            hist.append((features(d), (y - lo_p) / span * 100.0))
+        rng.shuffle(hist)
+    for _ in range(0 if records else 4000):
         r = {'overdueDays': rng.randint(-21, 260), 'periodicity': rng.choice([30, 90, 180, 365, 730, 1460]),
              'severity': rng.choices([0, 1, 2, 3, 4], weights=[55, 15, 14, 11, 5])[0],
              'criticality': rng.uniform(0.55, 0.95), 'traffic': rng.uniform(0.2, 1.0)}
