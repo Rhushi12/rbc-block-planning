@@ -27,6 +27,18 @@ export const asset=id=>assets.find(a=>a.id===id);
 
 // A movement occupies one section of one running line per leg.
 export const trainLegs=t=>Array.isArray(t.legs)?t.legs:(t.section?[{section:t.section,line:t.line||'UP',start:t.start,end:t.end}]:[]);
+// A running delay shifts every leg of one train later by the same minutes. The
+// timetable stays the reference; delays are an overlay a controller applies and
+// can clear, so a plan can be tested against traffic that is not running to book.
+export const delayed=(list,delays)=>{
+ if(!delays?.length)return list;
+ const by=new Map(delays.map(d=>[d.train,d.minutes]));
+ return list.map(t=>{
+  const m=by.get(t.id);
+  if(!m)return t;
+  return {...t,delay:m,legs:trainLegs(t).map(l=>({...l,start:l.start+m,end:l.end+m}))};
+ });
+};
 
 export const addDays=(iso,n)=>{const d=new Date(`${iso}T00:00:00Z`);d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);};
 export const daysBetween=(a,b)=>Math.round((Date.parse(`${b}T00:00:00Z`)-Date.parse(`${a}T00:00:00Z`))/86400000);
@@ -65,11 +77,11 @@ export const band=p=>p>=70?'Critical':p>=55?'High':p>=40?'Medium':'Low';
 
 export function demo(){
  return {
-  version:3,
+  version:4,
   date:PLANNING_DATE,
   horizon:'day',
   requests:backlog.map(r=>({...r})),
   availability:departments.map(d=>({department:d.code,ready:true,start:DAY_START,end:DAY_END,crews:d.crews})),
-  blocks:[],alerts:[],audit:[],
+  blocks:[],alerts:[],audit:[],delays:[],
  };
 }

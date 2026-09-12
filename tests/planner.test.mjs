@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {demo,trains,sections,corridorWindows,corridorWindow,spanOverlap,
         requiredMinutes,sequence,streamMinutes,dept,time,minutes,
         addDays,daysBetween,horizonDates,priorityOf,band,
-        DAY_START,DAY_END,BUFFER} from '../dist/data.js';
-import {validateBlock,validateRequest,approveBlock} from '../dist/safety.js';
+        delayed,DAY_START,DAY_END,BUFFER} from '../dist/data.js';
+import {validateBlock,validateRequest,approveBlock,withdrawBlock,
+        revalidateSchedule} from '../dist/safety.js';
 import {optimize,search,findSlot,freeIntervals,headroom,trainsAffected,
         separateMinutes,legIndex,WEIGHTS} from '../dist/planner.js';
 import {score,explain,featurise,FEATURES} from '../dist/priority-model.js';
@@ -336,4 +337,85 @@ test('invalid requests are rejected',()=>{
 test('the same activity cannot be pending twice on one asset',()=>{
  const s=state();const good=s.requests[0];
  assert.ok(validateRequest({...good,id:'new'},s).some(m=>/already pending/.test(m)));
+});
+
+// ------------------------------------------------- withdrawal and disruption
+test('a withdrawn block returns its work orders to the backlog',()=>{
+ const s=state();
+ const plan=optimize(s.requests.filter(r=>r.status==='Pending').map(r=>r.id),s,{horizon:'day'});
+ const out=approveBlock(plan.plans[0],s,'Sr DOM');
+ assert.ok(out.safe);
+ const id=out.block.id,ids=out.block.taskIds;
+ assert.equal(s.blocks.length,1);
+ assert.ok(ids.every(x=>s.requests.find(r=>r.id===x).status==='Scheduled'));
+
+ const w=withdrawBlock(id,s,'Sr DOM','permit refused on the day');
+ assert.ok(w.ok);
+ assert.equal(s.blocks.length,0);
+ assert.ok(ids.every(x=>s.requests.find(r=>r.id===x).status==='Pending'));
+ assert.ok(ids.every(x=>s.requests.find(r=>r.id===x).scheduledFor===undefined));
+ assert.match(s.audit[0].message,/withdrew/);
+ assert.match(s.audit[0].message,/permit refused/);
+});
+test('withdrawal needs a named controller and a block that exists',()=>{
+ const s=state();
+ assert.equal(withdrawBlock('nope',s,'Sr DOM').ok,false);
+ const plan=optimize(s.requests.filter(r=>r.status==='Pending').map(r=>r.id),s,{horizon:'day'});
+ const out=approveBlock(plan.plans[0],s,'Sr DOM');
+ assert.equal(withdrawBlock(out.block.id,s,'  ').ok,false);
+ assert.equal(s.blocks.length,1,'a refused withdrawal leaves the schedule untouched');
+});
+test('a running delay shifts every leg of that train and nothing else',()=>{
+ const target=trains[0];
+ const moved=delayed(trains,[{train:target.id,minutes:45}]);
+ const after=moved.find(t=>t.id===target.id);
+ assert.equal(after.delay,45);
+ target.legs.forEach((leg,i)=>{
+  assert.equal(after.legs[i].start,leg.start+45);
+  assert.equal(after.legs[i].end,leg.end+45);
+ });
+ assert.equal(moved.filter(t=>t.delay).length,1);
+ assert.equal(delayed(trains,[]),trains,'no delays is a no-op');
+});
+test('an approved block that a delay runs into stops clearing the gate',()=>{
+ const s=state();
+ const plan=optimize(s.requests.filter(r=>r.status==='Pending').map(r=>r.id),s,{horizon:'day'});
+ const natural=plan.plans.find(p=>!p.corridor);
+ assert.ok(natural,'the day plan should use at least one natural window');
+ assert.ok(approveBlock(natural,s,'Sr DOM').safe);
+ assert.equal(revalidateSchedule(s).length,0,'safe when granted');
+
+ // Run the train booked ahead of the possession late, so it slides into it.
+ const idx=legIndex(s.trains);
+ const legs=natural.line===null
+  ?[...(idx.get(`${natural.section}|UP`)||[]),...(idx.get(`${natural.section}|DN`)||[])]
+  :(idx.get(`${natural.section}|${natural.line}`)||[]);
+ const prev=legs.filter(l=>l.end+BUFFER<=natural.start).sort((a,b)=>b.end-a.end)[0];
+ assert.ok(prev,'there is a train booked ahead of this possession');
+ const owner=s.trains.find(t=>t.legs.includes(prev));
+ const late=natural.start-prev.start+1;   // its occupation now begins inside the block
+
+ s.delays=[{train:owner.id,minutes:late}];
+ s.trains=delayed(trains,s.delays);
+ const conflicts=revalidateSchedule(s);
+ assert.equal(conflicts.length,1);
+ assert.ok(conflicts[0].errors.some(e=>e.code==='TRAIN'));
+});
+test('an emergency work order is planned ahead of the model ranking',()=>{
+ const s=state();
+ const low=[...s.requests].sort((a,b)=>priorityOf(a,s.date)-priorityOf(b,s.date))[0];
+ assert.ok(priorityOf(low,s.date)<70,'starts well down the ranking');
+ low.emergency=true;
+ const plan=optimize(s.requests.filter(r=>r.status==='Pending').map(r=>r.id),s,{horizon:'day'});
+ const placed=plan.plans.flatMap(p=>p.taskIds);
+ assert.ok(placed.includes(low.id),'an emergency is scheduled even from the bottom of the list');
+});
+test('a preferred start moves the window and the gate still passes',()=>{
+ const s=state();
+ const plan=optimize(s.requests.filter(r=>r.status==='Pending').map(r=>r.id),s,{horizon:'day'});
+ const p=plan.plans.find(x=>!x.corridor);
+ const moved=search(p.taskIds,s,p.date,p.start+120).block;
+ assert.ok(moved,'a preferred start still returns a window');
+ assert.ok(validateBlock(moved,s).safe,'the moved window is re-checked, not trusted');
+ assert.equal(moved.end-moved.start,p.end-p.start);
 });

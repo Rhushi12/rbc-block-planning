@@ -239,3 +239,11 @@ dialog h2{font-size:1.2rem;margin:0 28px 16px 0}
  .side-foot{margin:0;border:0;padding:0}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* running-delay and preferred-window controls */
+.prefer{display:flex;align-items:center;gap:7px;font-size:.74rem;font-weight:600;
+ letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-right:auto}
+.prefer input{padding:7px 9px;border:1px solid #c8d5de;border-radius:7px;
+ font-size:.85rem;font-weight:600;color:var(--ink);background:#fff;
+ font-variant-numeric:tabular-nums}
+.delay-note{color:var(--amber)}

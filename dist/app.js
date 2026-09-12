@@ -1,17 +1,20 @@
 import {demo,sections,lines,trains,corridorWindows,departments,resources,assets,
         time,minutes,dept,deptLabel,section,trainLegs,addDays,weekday,HORIZONS,
-        priorityOf,band,overdueOf,requiredMinutes,sequence} from './data.js';
-import {validateBlock,validateRequest,approveBlock,overlaps} from './safety.js';
-import {optimize,freeIntervals,trainsAffected,separateMinutes,legIndex} from './planner.js';
+        priorityOf,band,overdueOf,requiredMinutes,sequence,delayed} from './data.js';
+import {validateBlock,validateRequest,approveBlock,overlaps,withdrawBlock,revalidateSchedule} from './safety.js';
+import {optimize,freeIntervals,trainsAffected,separateMinutes,legIndex,search} from './planner.js';
 import {explain,FEATURES,RMSE,TRAINED_ON} from './priority-model.js';
 
 const key='rbc-v3';
 let state,storageWarning='';
 try{
  state=JSON.parse(localStorage.getItem(key));
- if(!state||state.version!==3||!['requests','blocks','availability','alerts','audit'].every(k=>Array.isArray(state[k])))state=demo();
+ if(!state||state.version!==4||!['requests','blocks','availability','alerts','audit','delays'].every(k=>Array.isArray(state[k])))state=demo();
 }catch{state=demo();storageWarning='Saved data could not be read. Reference data reloaded.';}
-state.trains=trains;
+// The timetable is reference data; running delays are a controller overlay on
+// top of it, so the working timetable is rebuilt whenever a delay changes.
+const retime=()=>{state.trains=delayed(trains,state.delays);};
+retime();
 
 let page='Dashboard',horizon='day',result=null,notice=storageWarning,issues=[],
     filter='',deptFilter='',modal='',expanded=null;
@@ -144,7 +147,10 @@ function planCard(p,i){
    <div class="rec-act">
     ${v.safe?'<p class="ok">All hard rules pass against current data.</p>'
             :`<div class="err">${v.errors.slice(0,4).map(e=>`<p>${esc(e.message)}</p>`).join('')}</div>`}
-    <div class="button-row"><button data-reject="${i}">Reject</button>
+    <div class="button-row">
+     <label class="prefer">Prefer start<input type="time" id="prefer-${i}" value="${time(p.start)}"></label>
+     <button data-replan="${i}">Move window</button>
+     <button data-reject="${i}">Reject</button>
      <button class="primary" data-approve="${i}">Review &amp; approve</button></div></div></div></article>`;
 }
 
@@ -215,7 +221,7 @@ function backlogPage(){
     <td>${esc(section(r.section).code)}<small>${esc(lineLabel(r.line))}</small></td>
     <td class="num">${od>0?`<b class="late">${od}d late</b>`:`in ${-od}d`}<small>every ${r.periodicity}d</small></td>
     <td class="num">${r.duration} min<small>+${dept(r.department).setup}/${dept(r.department).clearance}</small></td>
-    <td>${badge(`${p} ${band(p)}`,bandKind(band(p)))}${r.status!=='Pending'?badge(r.status,'green'):''}</td>
+    <td>${r.emergency?badge('Emergency','red'):''}${badge(`${p} ${band(p)}`,bandKind(band(p)))}${r.status!=='Pending'?badge(r.status,'green'):''}</td>
     <td><button class="text" data-explain="${esc(r.id)}">${open?'Hide':'Why?'}</button></td></tr>`,
     open?`<tr class="drivers"><td colspan="6">${driverBars(r)}</td></tr>`:''];}))}
   ${rows.length>60?`<div class="panel-foot">Showing the 60 highest-priority of ${rows.length}. Narrow with search or department.</div>`:''}</section>`;
@@ -238,7 +244,19 @@ function corridorPage(){
    const best=Math.max(...lines.map(l=>Math.max(...freeIntervals(state,s.id,l,state.date,0,1440).map(([a,b])=>b-a),0)));
    return `<tr><td><strong>${esc(s.name)}</strong><small>${esc(s.code)}</small></td><td class="num">${s.km} km</td>
     <td class="num">${up} trains</td><td class="num">${dn} trains</td><td class="num">${best} min</td></tr>`;}))}
-  <div class="panel-foot">The longest gap the timetable leaves open anywhere is barely two hours, which is why heavy work needs a sanctioned corridor window.</div></section>`;
+  <div class="panel-foot">The longest gap the timetable leaves open anywhere is barely two hours, which is why heavy work needs a sanctioned corridor window.</div></section>
+ <section class="panel"><div class="panel-head"><div><h2>Running delays</h2>
+   <p>Put a train off its booked path and re-run the gate across every approved block.</p></div>
+   ${state.delays.length?'<button data-action="clear-delays">Clear all delays</button>':''}</div>
+  <form class="form-body" data-delay="1">
+   <div class="form-grid">
+    <label>Train<select name="train">${options(trains,null,t=>`${t.id} ${t.name}`,t=>t.id)}</select></label>
+    <label>Running late by (minutes)<input name="minutes" type="number" min="5" max="240" value="30" required></label></div>
+   <button type="submit">Apply delay and re-check the schedule</button></form>
+  ${state.delays.length?table(['Train','Running late by'],state.delays.map(d=>{
+    const t=trains.find(x=>x.id===d.train);
+    return `<tr><td><strong>${esc(d.train)}</strong><small>${esc(t?.name||'')}</small></td><td class="num">${d.minutes} min</td></tr>`;})):''}
+  <div class="panel-foot">A delay moves every leg of that train later by the same minutes. Approved blocks are re-validated straight away; any that stop clearing the gate are raised in Safety Alerts.</div></section>`;
 }
 
 // --------------------------------------------------------------- departments
@@ -274,13 +292,14 @@ function schedulePage(){
    <span><strong>${state.blocks.reduce((n,b)=>n+b.taskIds.length,0)}</strong>work orders</span>
    <span><strong>${apart-occupied}</strong>min recovered</span>
    <span><strong>${pct((apart-occupied)/apart*100)}</strong>against planning apart</span></div>`:''}
- <section class="panel">${table(['Date','Section / line','Window','Work','Approved by'],
+ <section class="panel">${table(['Date','Section / line','Window','Work','Approved by',''],
   state.blocks.slice().sort((a,b)=>a.date.localeCompare(b.date)||a.start-b.start).map(b=>
    `<tr><td><strong>${esc(dayLabel(b.date))}</strong><small>${esc(b.date)}</small></td>
     <td>${esc(section(b.section).code)}<small>${esc(lineLabel(b.line))}${b.corridor?' · corridor block':''}</small></td>
     <td class="num">${time(b.start)}–${time(b.end)}<small>${b.end-b.start} min</small></td>
     <td>${b.taskIds.length} order${b.taskIds.length>1?'s':''}<small>${esc(tasksFor(b).map(t=>t.title).join(' · ').slice(0,64))}</small></td>
-    <td>${esc(b.approvedBy)}<small>${esc(String(b.createdAt).slice(0,16).replace('T',' '))}</small></td></tr>`))}</section>
+    <td>${esc(b.approvedBy)}<small>${esc(String(b.createdAt).slice(0,16).replace('T',' '))}</small></td>
+    <td><button class="text" data-withdraw="${esc(b.id)}">Withdraw</button></td></tr>`))}</section>
  ${state.blocks.length?'':'<div class="empty-state"><h2>Nothing approved yet.</h2><p>Generate a block plan and approve a window to populate the schedule.</p><button data-page="Block Plan">Open block plan</button></div>'}`;
 }
 
@@ -314,6 +333,7 @@ function modalContent(){
    <label>Periodicity (days)<input name="periodicity" type="number" min="1" max="3650" value="90" required></label>
    <label>Days overdue<input name="overdueDays" type="number" min="-365" max="999" value="0" required></label>
    <label>Defect severity<select name="severity"><option value="0">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></label></div>
+  <label class="check"><input name="emergency" type="checkbox"> Emergency &mdash; plan ahead of the model ranking</label>
   <button class="primary" type="submit">Add to backlog</button>`;
  if(modal.startsWith('approve:')){
   const p=result.plans[Number(modal.split(':')[1])];
@@ -326,6 +346,16 @@ function modalContent(){
    <label>Approving controller<input name="controller" maxlength="80" required placeholder="Name and designation"></label>
    <label class="check"><input type="checkbox" required> I have reviewed this demonstration block.</label>
    <button class="primary" type="submit">Confirm approval</button>`;
+ }
+ if(modal.startsWith('withdraw:')){
+  const b=state.blocks.find(x=>x.id===modal.slice(9));
+  c=b?`<h2>Withdraw this block</h2>
+   <p>${esc(dayLabel(b.date))} · ${esc(section(b.section).code)} · ${time(b.start)}–${time(b.end)}</p>
+   <div class="warn-box">${b.taskIds.length} work order${b.taskIds.length===1?'':'s'} return to the backlog and are ranked again on the next plan.</div>
+   <label>Withdrawing controller<input name="controller" maxlength="80" required placeholder="Name and designation"></label>
+   <label>Reason<input name="reason" maxlength="120" placeholder="e.g. permit refused on the day"></label>
+   <button class="primary" type="submit">Withdraw block</button>`
+   :'<h2>Block not found</h2><p>It may already have been withdrawn.</p>';
  }
  if(modal==='export'){
   const rows=[['Date','Section','Line','Start','End','Minutes','Corridor block','Work orders','Approved by'],
@@ -400,6 +430,17 @@ document.addEventListener('click',e=>{
  if(el.dataset.horizon){horizon=el.dataset.horizon;result=null;render();return;}
  if(el.dataset.dept!==undefined&&!el.closest('form')){deptFilter=el.dataset.dept;render();return;}
  if(el.dataset.explain){expanded=expanded===el.dataset.explain?null:el.dataset.explain;render();return;}
+ if(el.dataset.withdraw){modal='withdraw:'+el.dataset.withdraw;issues=[];render();return;}
+ if(el.dataset.replan!==undefined){
+  const i=Number(el.dataset.replan),p=result.plans[i];
+  const want=minutes(document.querySelector('#prefer-'+i)?.value||'');
+  const out=search(p.taskIds,state,p.date,Number.isInteger(want)?want:undefined);
+  if(!out.block){
+   issues=[{message:'No window near that time satisfies every hard rule. The recommendation is unchanged.'}];
+   render();return;}
+  out.block.blockNo=p.blockNo;result.plans[i]=out.block;issues=[];
+  notice=`Window moved to ${time(out.block.start)}–${time(out.block.end)}. Every hard rule was checked again.`;
+  render();return;}
  if(el.dataset.reject!==undefined){
   result.plans.splice(Number(el.dataset.reject),1);
   result.summary.blocks=result.plans.length;
@@ -414,6 +455,8 @@ document.addEventListener('click',e=>{
  if(a==='dismiss'){notice='';render();}
  if(a==='close'){modal='';render();}
  if(a==='export'){modal='export';render();}
+ if(a==='clear-delays'){state.delays=[];retime();result=null;save();
+  notice='Running delays cleared. The plan is back on the booked timetable.';render();}
 });
 
 document.addEventListener('input',e=>{
@@ -454,6 +497,21 @@ document.addEventListener('submit',e=>{
    result=null;save();notice=`${deptLabel(d)} updated. Generate the plan again to use it.`;}
   issues=errors.map(m=>({message:m}));render();return;}
 
+ if(form.dataset.delay){
+  const m=Number(data.minutes);
+  if(!Number.isInteger(m)||m<5||m>240)errors.push('A delay must be a whole number of minutes from 5 to 240.');
+  if(!errors.length){
+   state.delays=[...state.delays.filter(d=>d.train!==data.train),{train:data.train,minutes:m}];
+   retime();
+   const broken=revalidateSchedule(state);
+   for(const b of broken)
+    record(`Approved block on ${b.block.date} no longer clears the gate`,b.errors);
+   result=null;save();
+   notice=broken.length
+    ?`${data.train} running ${m} min late. ${broken.length} approved block${broken.length===1?'':'s'} stopped clearing the gate — see Safety Alerts.`
+    :`${data.train} running ${m} min late. Every approved block still clears the gate.`;}
+  issues=errors.map(x=>({message:x}));render();return;}
+
  if(modal==='request'){
   const r={id:'MR-'+crypto.randomUUID().slice(0,6).toUpperCase(),asset:'MANUAL',
    title:String(data.title).trim(),section:data.section,line:data.line||null,
@@ -461,9 +519,12 @@ document.addEventListener('submit',e=>{
    periodicity:Number(data.periodicity),overdueDays:Number(data.overdueDays),
    dueOn:addDays(state.date,-Number(data.overdueDays)),
    defect:Number(data.severity)?'Reported on intake':null,severity:Number(data.severity),
-   criticality:0.8,traffic:0.6,status:'Pending'};
+   criticality:0.8,traffic:0.6,emergency:data.emergency==='on',status:'Pending'};
   errors=validateRequest(r,state);
-  if(!errors.length){state.requests.push(r);result=null;notice=`${r.id} added to the backlog.`;}}
+  if(!errors.length){state.requests.push(r);result=null;
+   notice=r.emergency
+    ?`${r.id} raised as an emergency. It is placed ahead of the model ranking — generate the plan again.`
+    :`${r.id} added to the backlog.`;}}
 
  if(modal.startsWith('approve:')){
   const i=Number(modal.split(':')[1]);
@@ -475,7 +536,13 @@ document.addEventListener('submit',e=>{
    issues=[];notice='Block approved and added to the schedule.';}
   else record('Approval blocked by final validation',out.errors);}
 
- if(modal==='reset'){state=demo();state.trains=trains;result=null;issues=[];
+ if(modal.startsWith('withdraw:')){
+  const out=withdrawBlock(modal.slice(9),state,data.controller,data.reason);
+  errors=(out.errors||[]).map(x=>x.message);
+  if(out.ok){result=null;
+   notice=`Block withdrawn. ${out.returned.length} work order${out.returned.length===1?'':'s'} back on the backlog.`;}}
+
+ if(modal==='reset'){state=demo();retime();result=null;issues=[];
   page='Dashboard';history.replaceState(null,'','#Dashboard');notice='Reference data restored.';}
 
  if(errors.length){document.querySelector('#form-error').innerHTML=errors.map(x=>`<p>${esc(x)}</p>`).join('');return;}

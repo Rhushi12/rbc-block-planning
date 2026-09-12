@@ -117,3 +117,40 @@ export function approveBlock(block,state,approvedBy){
   message:`${approvedBy.trim()} approved ${tasks.length} task${tasks.length>1?'s':''} on ${block.date} (${tasks.map(t=>t.id).join(', ')}).`});
  return {...result,block:approved};
 }
+
+// Approval is not final. A block is withdrawn when the work is cancelled, the
+// permit is refused on the day, or the plan it was built on no longer holds.
+// The work orders go back on the backlog at the priority the model gives them.
+export function withdrawBlock(blockId,state,withdrawnBy,reason){
+ const i=state.blocks.findIndex(b=>b.id===blockId);
+ if(i<0)return {ok:false,errors:[{code:'BLOCK',message:'That block is no longer on the schedule.'}]};
+ if(!withdrawnBy?.trim())return {ok:false,errors:[{code:'APPROVAL',message:'Enter the withdrawing controller’s name.'}]};
+ const [block]=state.blocks.splice(i,1);
+ const returned=[];
+ for(const id of block.taskIds){
+  const t=state.requests.find(r=>r.id===id);
+  if(t){t.status='Pending';delete t.scheduledFor;returned.push(t.id);}
+ }
+ state.audit.unshift({at:new Date().toISOString(),
+  message:`${withdrawnBy.trim()} withdrew the block on ${block.date} ${block.section}; `+
+   `${returned.length} work order${returned.length===1?'':'s'} returned to the backlog (${returned.join(', ')}).`+
+   (reason?.trim()?` Reason: ${reason.trim()}`:'')});
+ return {ok:true,block,returned};
+}
+
+// Re-run the gate over everything already committed. The world moves under a
+// plan — a train runs late, a department stands down — and an approved block
+// that was safe when it was granted may not be safe now.
+export function revalidateSchedule(state){
+ const out=[];
+ for(const block of state.blocks){
+  // A committed block owns its work orders, so they read as Scheduled and the
+  // gate would reject the block for its own tasks. Re-check it the way the gate
+  // saw it at approval: its own work pending, the block itself off the board.
+  const shadow={...state,
+   requests:state.requests.map(r=>block.taskIds.includes(r.id)?{...r,status:'Pending'}:r)};
+  const {safe,errors}=validateBlock(block,shadow);
+  if(!safe)out.push({block,errors});
+ }
+ return out;
+}

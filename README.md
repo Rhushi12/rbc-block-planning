@@ -15,7 +15,7 @@ Node.js 20 or newer. From this folder:
 
 ```sh
 npm start          # http://127.0.0.1:5173
-npm test           # 36 tests
+npm test           # 42 tests
 npm run check      # syntax check every module
 ```
 
@@ -148,6 +148,32 @@ than padded. The six that never schedule are deep screening, rail grinding and h
 each needs more minutes than the longest sanctioned band, so the plan says so explicitly and
 tells the controller to raise an extended traffic block with traffic diverted.
 
+## When the plan meets the day
+
+A plan is a proposal about a future that moves. Four things can move it, and each
+one is a control in the interface rather than a caveat in this file.
+
+**A train runs late.** *Corridor & Traffic → Running delays* puts a timetabled
+train off its booked path; every leg of that train shifts by the same minutes.
+The committed schedule is re-validated immediately and anything that stops
+clearing the gate is raised in **Safety Alerts**. The timetable stays the
+reference — a delay is an overlay the controller applies and can clear.
+
+**The work is urgent.** A work order raised as an **emergency** is placed ahead
+of the model ranking rather than given a large score. The model stays a model of
+routine prioritisation; declaring an emergency stays a human act.
+
+**The controller wants a different window.** Every recommendation carries a
+**Prefer start** time and a **Move window** button. The planner re-searches around
+that time and the block is re-validated — a preference is a hint, not an override,
+and it is clamped to what the sanctioned band and the hard rules allow.
+
+**The block cannot run after all.** Any approved block can be **withdrawn** with a
+named controller and a reason. Its work orders return to the backlog at the
+priority the model gives them and the withdrawal is written to the audit trail.
+
+None of these bypass the gate. Each one re-runs it.
+
 ## Five-minute demonstration
 
 1. **Dashboard** — 144 pending orders over 228 assets. The occupancy strip shows why this is
@@ -187,10 +213,13 @@ over HTTP.
 | `POST /api/windows` | Free windows on one section and running line |
 | `POST /api/validate` | Run the hard-rule gate against one block |
 | `POST /api/approve` | Validate and commit one block |
+| `POST /api/withdraw` | Withdraw a committed block and return its work orders |
+| `POST /api/revalidate` | Re-run the gate over the schedule, optionally against delayed traffic |
 
 ```sh
 curl -s -X POST http://127.0.0.1:5173/api/plan -d '{"horizon":"week"}'
 curl -s -X POST http://127.0.0.1:5173/api/prioritise -d '{}'
+curl -s -X POST http://127.0.0.1:5173/api/revalidate   -d '{"delays":[{"train":"12937","minutes":45}]}'
 ```
 
 `POST` bodies accept an optional `state` (defaults to the seeded day). Bodies are capped at
@@ -210,7 +239,7 @@ dist/app.js             interface
 server.mjs              static server and planning API, loopback only
 tools/build_corridor.py rebuilds the corridor from the DataMeet dataset
 tools/build_backlog.py  regenerates the backlog and refits the priority model
-tests/planner.test.mjs  36 tests
+tests/planner.test.mjs  42 tests
 ```
 
 `dist/` is authored source and is committed. There is no build step for the app itself; the
@@ -223,12 +252,15 @@ This is not railway control software.
 - **The backlog is synthetic.** Activity classes and periodicity bands follow departmental
   practice, but the defects, dates and durations are generated. The priority model is trained
   on synthetic history.
-- **The timetable is real but static.** No live running data, no delays, no cancellations. Every
-  path is treated as occupied — the conservative assumption.
+- **The timetable is real but static.** No live feed from the Control Office Application:
+  delays are entered by hand to test a plan against traffic that is not running to book,
+  not received from NTES or COA. Every booked path is treated as occupied — the
+  conservative assumption.
 - **No integration.** Nothing reads TMS, SMMS, TDMS or the Control Office Application. The
   module boundary where those feeds would land is `dist/backlog.js` and `dist/corridor.js`.
-- **Approval is a demonstration acknowledgement**, not authenticated authority. State lives in
-  one browser's localStorage. Not multi-user, not a system of record.
+- **Approval is a demonstration acknowledgement**, not authenticated authority. It is
+  reversible and audited, but the name typed into the dialogue is not verified against
+  anything. State lives in one browser's localStorage. Not multi-user, not a system of record.
 - **Grouping is greedy**, not optimal. It is deterministic and explainable and does not claim
   global optimality; a constraint solver would do better on the packing.
 - **Not modelled:** temporary speed restrictions after work, gang and machinery travel between

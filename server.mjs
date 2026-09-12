@@ -2,9 +2,9 @@ import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {demo,trains,sections,corridorWindows,assets,departments,resources,
-        priorityOf,band,HORIZONS} from './dist/data.js';
+        priorityOf,band,HORIZONS,delayed} from './dist/data.js';
 import {optimize,search,freeIntervals,trainsAffected} from './dist/planner.js';
-import {validateBlock,approveBlock} from './dist/safety.js';
+import {validateBlock,approveBlock,withdrawBlock,revalidateSchedule} from './dist/safety.js';
 import {explain,FEATURES,RMSE,TRAINED_ON} from './dist/priority-model.js';
 
 const root=path.resolve('dist');
@@ -33,7 +33,9 @@ function readState(input){
  const s=input&&typeof input==='object'&&input.state&&typeof input.state==='object'?input.state:base;
  for(const k of ['requests','blocks','availability'])
   if(!Array.isArray(s[k]))throw new Error(`state.${k} must be an array.`);
- return {...s,trains:Array.isArray(s.trains)&&s.trains.length?s.trains:trains,
+ const delays=Array.isArray(s.delays)?s.delays:[];
+ const timetable=Array.isArray(s.trains)&&s.trains.length?s.trains:trains;
+ return {...s,trains:delayed(timetable,delays),delays,
    alerts:Array.isArray(s.alerts)?s.alerts:[],audit:Array.isArray(s.audit)?s.audit:[],
    date:s.date||base.date};
 }
@@ -85,6 +87,24 @@ const api={
   if(!input.block||typeof input.block!=='object')throw new Error('Provide a block object.');
   const result=approveBlock(input.block,state,input.approvedBy);
   return {...result,blocks:state.blocks,audit:state.audit};},
+
+ // Approval is reversible. Withdrawing returns the work orders to the backlog.
+ 'POST /api/withdraw':input=>{const state=readState(input);
+  if(!input.blockId)throw new Error('Provide blockId.');
+  const result=withdrawBlock(input.blockId,state,input.withdrawnBy,input.reason);
+  return {...result,blocks:state.blocks,audit:state.audit};},
+
+ // Re-run the gate across the committed schedule, optionally against delayed
+ // traffic: POST {"delays":[{"train":"12009","minutes":45}]}.
+ 'POST /api/revalidate':input=>{const state=readState(input);
+  if(Array.isArray(input.delays)){
+   state.delays=input.delays;
+   state.trains=delayed(trains,input.delays);}
+  const conflicts=revalidateSchedule(state);
+  return {date:state.date,delays:state.delays,checked:state.blocks.length,
+   safe:conflicts.length===0,
+   conflicts:conflicts.map(c=>({block:c.block.id,date:c.block.date,section:c.block.section,
+     start:c.block.start,end:c.block.end,errors:c.errors}))};},
 };
 
 http.createServer(async(req,res)=>{
@@ -108,5 +128,5 @@ http.createServer(async(req,res)=>{
 }).listen(port,'127.0.0.1',()=>{
  console.log(`RBC ready: http://127.0.0.1:${port}`);
  console.log(`  corridor ${sections.length} sections · ${trains.length} trains · ${assets.length} assets on register`);
- console.log(`  API: GET /api/reference · POST /api/prioritise · POST /api/plan`);
+ console.log(`  API: GET /api/reference · POST /api/prioritise · POST /api/plan · POST /api/revalidate`);
 });

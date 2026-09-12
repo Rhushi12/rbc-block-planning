@@ -196,8 +196,11 @@ export function optimize(ids,state,options={}){
  const dates=horizonDates(from,horizon);
  const pool=state.requests.filter(t=>ids.includes(t.id)&&t.status==='Pending');
 
- // Work the backlog in priority order; the model decides what matters most.
- const ranked=[...pool].sort((a,b)=>priorityOf(b,from)-priorityOf(a,from)||a.id.localeCompare(b.id));
+ // Work the backlog in priority order. An emergency is a human declaration,
+ // not a large model score: it is placed ahead of the ranking rather than fed
+ // into it, so the model stays a model of routine prioritisation.
+ const ranked=[...pool].sort((a,b)=>
+  (b.emergency?1:0)-(a.emergency?1:0)||priorityOf(b,from)-priorityOf(a,from)||a.id.localeCompare(b.id));
  const working=structuredClone(state);
  working.blocks=[...state.blocks];
  const placed=new Set(),plans=[];
