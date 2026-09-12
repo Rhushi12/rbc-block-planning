@@ -17,7 +17,7 @@ Node.js 20 or newer. From this folder:
 
 ```sh
 npm start          # http://127.0.0.1:5173
-npm test           # 49 tests
+npm test           # 53 tests
 npm run check      # syntax check every module
 ```
 
@@ -338,7 +338,8 @@ assist.mjs              prompts and the Ollama client; optional, never in the pl
 tools/build_corridor.py rebuilds the corridor from the DataMeet dataset
 tools/build_backlog.py  regenerates the backlog, refits the hazard and priority models
 tools/build_weights.py  refits the planner objective from recorded window choices
-tests/planner.test.mjs  49 tests
+tests/planner.test.mjs  49 tests over the planner, the gate and the models
+tests/render.test.mjs   4 tests that render the interface without a browser
 ```
 
 `dist/` is authored source and is committed. There is no build step for the app itself; the
