@@ -1,0 +1,16 @@
+node_modules/
+.sites-runtime/
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+.cache/
+test-results/
+# dist contains authored source; keep it tracked.
+
+# Bulk source data for tools/build_corridor.py — download from
+# https://github.com/datameet/railways (stations.json, schedules.json)
+tools/raw/
