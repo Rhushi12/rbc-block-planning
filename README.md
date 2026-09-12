@@ -17,7 +17,7 @@ Node.js 20 or newer. From this folder:
 
 ```sh
 npm start          # http://127.0.0.1:5173
-npm test           # 42 tests
+npm test           # 49 tests
 npm run check      # syntax check every module
 ```
 
@@ -36,7 +36,7 @@ running, the assistant controls do not appear and everything else behaves identi
 | Requirement | Implementation |
 | --- | --- |
 | Integrate defects and overdue maintenance from TMS, SMMS, TDMS with corridor block availability | `dist/backlog.js` (register + backlog), `dist/corridor.js` (timetable + sanctioned windows) |
-| Use AI/ML to prioritise and schedule maintenance tasks | `dist/priority-model.js` ranks; `dist/planner.js` schedules |
+| Use AI/ML to prioritise and schedule maintenance tasks | `dist/hazard-model.js` predicts failure; `dist/priority-model.js` ranks; `dist/planner.js` schedules against fitted weights |
 | Optimise block scheduling to maximise asset uptime | Objective in `dist/planner.js`; line-availability gain reported per plan |
 | Block plans over multiple time horizons — weekly and monthly | Day / week / month selector, `optimize(..., {horizon})` |
 
@@ -90,23 +90,66 @@ load, so `tools/build_backlog.py` generates one. What is real is the **structure
 
 Swap the generator for a TMS/SMMS/TDMS extract and nothing downstream changes.
 
-## Prioritisation
+## Three things are fitted, and they are fitted separately
 
-`tools/build_backlog.py` fits a ridge-regularised linear model to 4,000 historical
-prioritisation decisions and writes the coefficients to `dist/priority.js`. Inference is a
-handful of multiplies in `dist/priority-model.js`, so the app keeps its zero-dependency,
-runs-offline property.
+Nothing here is one model doing everything. Three different questions get three
+different models, each answerable on its own terms, and the boundaries between them are
+where the argument with a controller actually happens.
 
-Features: days overdue against periodicity · reported defect severity · asset criticality ·
-section traffic density · consequence of failure. Holdout RMSE is 6.7 priority points on a
-0–100 scale.
+### What is likely to break — a hazard model
+
+`dist/hazard.js` is a logistic model fitted by Newton-Raphson to 4,800 asset cycles:
+**P(this asset develops a reportable defect before its next maintenance window)**.
+
+Features: wear against periodicity · section traffic density · wear under traffic ·
+asset class fragility. Held out, **AUC 0.774** and **Brier 0.165** against a base rate of
+**0.285**. RMSE would mean nothing for a classifier — AUC says whether the ordering is
+right, Brier whether the probabilities themselves are honest.
+
+It predicts **probability only**. What a failure would cost is a separate quantity, held
+separately, and the two are multiplied downstream rather than merged. That separation is
+the point: a bridge fails rarely and expensively, a track circuit often and cheaply, and
+one number cannot say both.
+
+### What to do first — a priority model
+
+`dist/priority.js` is a ridge-regularised linear fit to 4,000 prioritisation decisions.
+Four features, chosen so none of them says what another already says: days overdue against
+periodicity · reported defect severity · **predicted failure risk** · consequence of failure.
+Holdout RMSE **4.6** on a 0–100 scale.
+
+Criticality and traffic density used to sit here as standalone features too. Carrying them
+twice — once alone, once inside consequence, and again inside the hazard model — made the
+fit collinear and drove the risk coefficient *negative*, which would have shown a controller
+that a likelier failure lowers priority. Dropping the duplicates fixed the sign and improved
+the holdout error.
 
 For a linear model the exact Shapley attribution of a feature is
 `coefficient × (feature − training mean)`, so every score decomposes exactly into its drivers.
-The backlog page shows that breakdown per work order behind **Why?**.
+A logistic model is linear in the *log-odds*, so the hazard decomposes exactly there — and the
+interface says so rather than pretending the percentage decomposes. **Why?** on any work order
+shows both breakdowns side by side.
 
-The training history is synthetic. The feature set, the fitting pipeline and the inference
-path are the deliverable; point them at real records and retrain.
+### Which window to take — a fitted objective
+
+The three weights the planner trades off used to be typed in by hand. *"Who picked 15?"* is a
+fair question and *"it felt about right"* is a poor answer, so `tools/build_weights.py` learns
+them from which window was chosen out of the ones on offer — a **conditional logit**, the
+standard discrete-choice model for picking one option from a set.
+
+Held out it agrees with the recorded choice **77%** of the time against **28%** for taking the
+first admissible window. Recovering the generating weights took two corrections worth keeping:
+gradient descent could not fit three features spanning 45, 1400 and 40 units with one step
+size, so the fit uses Newton-Raphson; and when every choice set contained a natural gap the
+traffic weight was only bounded below, never identified, because a corridor window never wins.
+Adding the sets where the timetable leaves nothing long enough — the common case on this
+corridor — pins it down.
+
+Only ratios are identified in a conditional logit, so the weights are normalised to
+`headroom = 1`, which is also the planner's unit: minutes.
+
+**All three histories are synthetic.** The feature sets, the fitting procedures and the
+inference paths are the deliverable; point them at real records and refit.
 
 ## How a window is chosen
 
@@ -114,14 +157,17 @@ Candidates come in two kinds — windows the timetable already leaves open, and 
 corridor windows bought by regulating traffic:
 
 ```
-score = clearance to the nearest train (capped at 45 min)
-      − minutes later in the day        × 0.01
-      − trains regulated                × 15
+score = clearance to the nearest train (capped at 45 min) × 1
+      − minutes later in the day                          × 0.0106
+      − trains regulated                                  × 14.77
 ```
 
-Every weight is in minutes, so they are directly comparable and arguable. The traffic term
-dominates by design: a natural gap always beats a granted window, and among granted windows
-the cheapest one wins. Weights live in `WEIGHTS` in `dist/planner.js`.
+Every weight is in minutes, so they are directly comparable and arguable — and the last two
+are **fitted, not chosen** (see above). The traffic term dominates, which is a finding rather
+than a setting: a natural gap beats a granted window, and among granted windows the cheapest
+one wins. The cap and the preference-deviation term stay structural, because they are not
+tradeoffs the choice data can speak to. `dist/weights.js` holds the fit; `WEIGHTS` in
+`dist/planner.js` combines it with the structural terms.
 
 The score is piecewise linear inside a free interval, so the optimum sits at an interval edge,
 its midpoint, or a constraint boundary. Four candidates per interval replaces scanning the day
@@ -277,8 +323,11 @@ curl -s -X POST http://127.0.0.1:5173/api/revalidate   -d '{"delays":[{"train":"
 ```
 dist/corridor.js        GENERATED  real sections, trains, sanctioned windows
 dist/backlog.js         GENERATED  asset register and maintenance backlog
-dist/priority.js        GENERATED  fitted model coefficients
+dist/priority.js        GENERATED  fitted priority coefficients
+dist/hazard.js          GENERATED  fitted failure-risk coefficients
+dist/weights.js         GENERATED  fitted planner objective weights
 dist/priority-model.js  scoring and exact per-feature attribution
+dist/hazard-model.js    failure probability and its exact log-odds attribution
 dist/data.js            reference data, time and horizon helpers, block arithmetic
 dist/safety.js          the hard-rule gate and atomic approval
 dist/planner.js         free-window search, objective, horizon planning
@@ -287,20 +336,23 @@ dist/assist.js          browser side of the assistant: probe, call, deadline
 server.mjs              static server and planning API, loopback only
 assist.mjs              prompts and the Ollama client; optional, never in the planning path
 tools/build_corridor.py rebuilds the corridor from the DataMeet dataset
-tools/build_backlog.py  regenerates the backlog and refits the priority model
-tests/planner.test.mjs  42 tests
+tools/build_backlog.py  regenerates the backlog, refits the hazard and priority models
+tools/build_weights.py  refits the planner objective from recorded window choices
+tests/planner.test.mjs  49 tests
 ```
 
 `dist/` is authored source and is committed. There is no build step for the app itself; the
-Python tools only regenerate the three GENERATED files.
+Python tools only regenerate the GENERATED files, and `npm run build` runs both of them.
 
 ## Explicit limits
 
 This is not railway control software.
 
 - **The backlog is synthetic.** Activity classes and periodicity bands follow departmental
-  practice, but the defects, dates and durations are generated. The priority model is trained
-  on synthetic history.
+  practice, but the defects, dates and durations are generated. All three models — hazard,
+  priority and the planner objective — are fitted to synthetic history. Their reported
+  figures (AUC 0.774, RMSE 4.6, 77% choice agreement) measure the procedures recovering a
+  process we generated, not performance against railway reality.
 - **The timetable is real but static.** No live feed from the Control Office Application:
   delays are entered by hand to test a plan against traffic that is not running to book,
   not received from NTES or COA. Every booked path is treated as occupied — the

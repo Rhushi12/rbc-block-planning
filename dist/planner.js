@@ -1,4 +1,5 @@
 import {validateBlock,requiredMinutes,sequence} from './safety.js';
+import {LEARNED,FIT} from './weights.js';
 import {trainLegs,sections,lines,dept,deptLabel,sectionName,priorityOf,band,
         horizonDates,addDays,daysBetween,overdueOf,spanOverlap,corridorWindows,
         DAY_START,DAY_END,BUFFER} from './data.js';
@@ -7,7 +8,13 @@ import {trainLegs,sections,lines,dept,deptLabel,sectionName,priorityOf,band,
 // with two minutes of clearance collapses the moment a train runs late.
 // Regulating a train is the real cost of a corridor block, so it is priced well
 // above any scheduling convenience: a natural gap always beats a granted window.
-export const WEIGHTS={headroom:1,headroomCap:45,earliness:0.01,deviation:1,trainRegulated:15};
+// The three traded-off terms are fitted, not chosen: tools/build_weights.py
+// recovers them from which window was picked out of the ones on offer. The cap
+// and the deviation term are structural rather than learned - the cap says when
+// more clearance stops buying robustness, deviation says how hard a controller's
+// stated preference pulls - and neither is a tradeoff the choice data can speak to.
+export const WEIGHTS={...LEARNED,headroomCap:45,deviation:1};
+export {FIT as WEIGHT_FIT};
 
 export const REASONS={
  TRAIN:'Train movements and their safety margin leave no window long enough on this running line.',

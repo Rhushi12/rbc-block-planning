@@ -3,12 +3,16 @@ import assert from 'node:assert/strict';
 import {demo,trains,sections,corridorWindows,corridorWindow,spanOverlap,
         requiredMinutes,sequence,streamMinutes,dept,time,minutes,
         addDays,daysBetween,horizonDates,priorityOf,band,
-        delayed,DAY_START,DAY_END,BUFFER} from '../dist/data.js';
+        delayed,riskOf,consequenceOf,DAY_START,DAY_END,BUFFER} from '../dist/data.js';
 import {validateBlock,validateRequest,approveBlock,withdrawBlock,
         revalidateSchedule} from '../dist/safety.js';
 import {optimize,search,findSlot,freeIntervals,headroom,trainsAffected,
         separateMinutes,legIndex,WEIGHTS} from '../dist/planner.js';
 import {score,explain,featurise,FEATURES} from '../dist/priority-model.js';
+import {failureRisk,explainRisk,hazardFeatures,riskBand,
+        HFEATURES,AUC,BRIER,BASE_RATE} from '../dist/hazard-model.js';
+import {LEARNED,FIT} from '../dist/weights.js';
+import {HCOEF,HMEAN} from '../dist/hazard.js';
 
 const state=()=>{const s=demo();s.trains=trains;return s;};
 const pick=(s,fn)=>s.requests.find(fn);
@@ -418,4 +422,86 @@ test('a preferred start moves the window and the gate still passes',()=>{
  assert.ok(moved,'a preferred start still returns a window');
  assert.ok(validateBlock(moved,s).safe,'the moved window is re-checked, not trusted');
  assert.equal(moved.end-moved.start,p.end-p.start);
+});
+
+// ------------------------------------------------------- hazard model
+test('the hazard model returns a probability and reports how well it separates',()=>{
+ assert.equal(HFEATURES.length,4);
+ assert.ok(AUC>0.7&&AUC<1,'held-out AUC should beat chance by a clear margin');
+ assert.ok(BRIER>0&&BRIER<0.25,'Brier score should beat predicting the base rate');
+ assert.ok(BASE_RATE>0.05&&BASE_RATE<0.6,'a plausible defect rate per cycle');
+ for(const r of state().requests){
+  const p=failureRisk(r);
+  assert.ok(p>0&&p<1,`${r.id} risk out of range`);
+ }
+});
+test('risk rises with wear and with traffic, and is not the same as consequence',()=>{
+ const base={periodicity:90,traffic:0.5,class:'Rail'};
+ const fresh=failureRisk({...base,elapsedDays:20});
+ const worn =failureRisk({...base,elapsedDays:170});
+ assert.ok(worn>fresh,'a worn asset is likelier to have developed a defect');
+
+ const quiet=failureRisk({...base,elapsedDays:120,traffic:0.2});
+ const busy =failureRisk({...base,elapsedDays:120,traffic:1.0});
+ assert.ok(busy>quiet,'the same asset under more traffic is likelier to fail');
+
+ // Probability and consequence are separate quantities and must stay separate:
+ // a bridge fails rarely and expensively, a track circuit often and cheaply.
+ const bridge={periodicity:365,elapsedDays:300,traffic:0.5,class:'Bridge',criticality:0.80};
+ const circuit={periodicity:90,elapsedDays:75,traffic:0.5,class:'Track circuit',criticality:0.60};
+ assert.ok(failureRisk(circuit)>failureRisk(bridge),'the track circuit fails more often');
+ assert.ok(consequenceOf(bridge)>consequenceOf(circuit),'the bridge costs more when it does');
+});
+test('risk attribution is exact in the log-odds',()=>{
+ const s=state();
+ for(const r of s.requests.slice(0,25)){
+  const parts=explainRisk(r);
+  assert.equal(parts.length,HFEATURES.length);
+  const p=failureRisk(r);
+  const logOdds=Math.log(p/(1-p));
+  // Contributions are deviations from the training mean, so the log-odds at the
+  // mean asset plus every contribution must land exactly on this asset's log-odds.
+  const atMean=HCOEF[0]+HCOEF.slice(1).reduce((n,c,i)=>n+c*HMEAN[i],0);
+  const sum=parts.reduce((n,x)=>n+x.logOdds,0);
+  assert.ok(Math.abs(logOdds-(atMean+sum))<1e-9,
+    `${r.id}: contributions do not sum to the log-odds`);
+  assert.equal(hazardFeatures(r).length,HFEATURES.length);
+  assert.ok(['Low','Raised','High'].includes(riskBand(p)));
+ }
+});
+test('the hazard baked into the backlog matches the hazard recomputed',()=>{
+ const s=state();
+ for(const r of s.requests.slice(0,40))
+  assert.ok(Math.abs(r.risk-riskOf(r,s.date))<1e-4,`${r.id} stored risk drifted`);
+});
+test('predicted risk raises priority rather than lowering it',()=>{
+ assert.ok(FEATURES.includes('Predicted failure risk'));
+ const i=FEATURES.indexOf('Predicted failure risk');
+ const base={overdueDays:10,periodicity:90,severity:0,criticality:0.8,traffic:0.6};
+ const low =score({...base,risk:0.05});
+ const high=score({...base,risk:0.85});
+ assert.ok(high>low,'a likelier failure must not score lower');
+ const parts=explain({...base,risk:0.85});
+ assert.ok(parts.find(x=>x.name===FEATURES[i]).contribution>0);
+});
+
+// ------------------------------------------------- learned planner weights
+test('the planner objective is fitted, and traffic dominates the tradeoff',()=>{
+ assert.equal(LEARNED.headroom,1,'weights are normalised to minutes of clearance');
+ assert.ok(LEARNED.trainRegulated>5,'regulating a train costs real minutes');
+ assert.ok(LEARNED.earliness>0&&LEARNED.earliness<1,'lateness in the day is a tiebreak');
+ assert.ok(LEARNED.trainRegulated>LEARNED.headroom*5,
+   'a natural gap must beat a granted window by a wide margin');
+ assert.ok(FIT.agreement>FIT.baseline*2,'the fit must beat taking the first window');
+ // The planner keeps the structural terms the choice data cannot speak to.
+ assert.equal(WEIGHTS.headroomCap,45);
+ assert.equal(WEIGHTS.deviation,1);
+ assert.equal(WEIGHTS.trainRegulated,LEARNED.trainRegulated);
+});
+test('a natural window still beats a corridor window under the fitted weights',()=>{
+ const s=state();
+ const plan=optimize(s.requests.filter(r=>r.status==='Pending').map(r=>r.id),s,{horizon:'day'});
+ const natural=plan.plans.filter(p=>!p.corridor);
+ assert.ok(natural.length,'the fitted objective still prefers free windows where they exist');
+ for(const p of natural)assert.equal(trainsAffected(p,s),0,'a natural window regulates nobody');
 });

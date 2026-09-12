@@ -1,9 +1,11 @@
 import {demo,sections,lines,trains,corridorWindows,departments,resources,assets,
         time,minutes,dept,deptLabel,section,trainLegs,addDays,weekday,HORIZONS,
-        priorityOf,band,overdueOf,requiredMinutes,sequence,delayed} from './data.js';
+        priorityOf,band,overdueOf,requiredMinutes,sequence,delayed,
+        riskOf,riskBand,consequenceOf} from './data.js';
 import {validateBlock,validateRequest,approveBlock,overlaps,withdrawBlock,revalidateSchedule} from './safety.js';
 import {optimize,freeIntervals,trainsAffected,separateMinutes,legIndex,search} from './planner.js';
 import {explain,FEATURES,RMSE,TRAINED_ON} from './priority-model.js';
+import {explainRisk,HFEATURES,AUC,BRIER,BASE_RATE,HAZARD_TRAINED_ON} from './hazard-model.js';
 import {assist,probeAssist,callAssist} from './assist.js';
 
 const key='rbc-v3';
@@ -213,14 +215,24 @@ function blockPlan(){
 }
 
 // ------------------------------------------------------------------ backlog
+function bars(parts,key,fmt){
+ const max=Math.max(...parts.map(p=>Math.abs(p[key])),1e-9);
+ return parts.map(p=>`<div class="driver"><span>${esc(p.name)}</span>
+   <div class="bar"><i class="${p[key]<0?'neg':'pos'}" style="width:${Math.abs(p[key])/max*100}%"></i></div>
+   <b class="${p[key]<0?'neg':'pos'}">${p[key]>0?'+':''}${fmt(p[key])}</b></div>`).join('');
+}
 function driverBars(r){
- const parts=explain({...r,overdueDays:overdueOf(r,state.date)});
- const max=Math.max(...parts.map(p=>Math.abs(p.contribution)),1);
- return `<div class="drivers-box"><strong>What drives this score</strong>
-  ${parts.map(p=>`<div class="driver"><span>${esc(p.name)}</span>
-    <div class="bar"><i class="${p.contribution<0?'neg':'pos'}" style="width:${Math.abs(p.contribution)/max*100}%"></i></div>
-    <b class="${p.contribution<0?'neg':'pos'}">${p.contribution>0?'+':''}${p.contribution.toFixed(1)}</b></div>`).join('')}
-  <small>Exact for a linear model: coefficient × (feature − training mean). The parts sum to this order's score above the baseline.</small></div>`;
+ const risk=riskOf(r,state.date);
+ const parts=explain({...r,overdueDays:overdueOf(r,state.date),risk});
+ const rparts=explainRisk({...r,elapsedDays:(r.elapsedDays??0)+overdueOf(r,state.date)-(r.overdueDays??0)});
+ return `<div class="drivers-grid">
+  <div class="drivers-box"><strong>What drives this priority</strong>
+   ${bars(parts,'contribution',v=>v.toFixed(1))}
+   <small>Exact for a linear model: coefficient × (feature − training mean). The parts sum to this order's score above the baseline.</small></div>
+  <div class="drivers-box"><strong>What drives the failure risk</strong>
+   ${bars(rparts,'logOdds',v=>v.toFixed(2))}
+   <small>${(risk*100).toFixed(0)}% chance of a reportable defect before the next window, against a ${(BASE_RATE*100).toFixed(0)}% base rate.
+    A logistic model is linear in the log-odds, so the attribution is exact there — not in the percentage.</small></div></div>`;
 }
 
 function backlogPage(){
@@ -231,26 +243,32 @@ function backlogPage(){
  return `<div class="page-title"><div><h1>Maintenance backlog</h1>
    <p>Defects and overdue maintenance from ${departments.map(d=>d.system).join(', ')}, ranked by the priority model.</p></div>
   <button class="primary" data-modal="request">+ Raise work order</button></div>
- <div class="model-note"><strong>Priority model</strong>
-  <span>Ridge-regularised linear fit · ${TRAINED_ON.toLocaleString()} historical decisions · RMSE ${RMSE} of 100</span>
-  <span>${FEATURES.join(' · ')}</span>
-  <span class="warn">Trained on synthetic history pending access to real TMS/SMMS/TDMS records.</span></div>
+ <div class="model-grid">
+  <div class="model-note"><strong>Priority model · what to do first</strong>
+   <span>Ridge-regularised linear fit · ${TRAINED_ON.toLocaleString()} historical decisions · RMSE ${RMSE} of 100</span>
+   <span>${FEATURES.join(' · ')}</span></div>
+  <div class="model-note"><strong>Failure-risk model · what is likely to break</strong>
+   <span>Logistic hazard by Newton-Raphson · ${HAZARD_TRAINED_ON.toLocaleString()} asset cycles · AUC ${AUC} · Brier ${BRIER}</span>
+   <span>${HFEATURES.join(' · ')}</span></div></div>
+ <div class="model-note"><span class="warn">Probability and consequence are held apart and multiplied, not merged: a bridge fails rarely and expensively, a track circuit often and cheaply. Both models are trained on synthetic history pending access to real TMS/SMMS/TDMS records.</span></div>
  <section class="panel"><div class="panel-head"><h2>${rows.length} work orders</h2>
    <div class="filters"><div class="segmented small">
      <button data-dept="" class="${deptFilter===''?'on':''}">All</button>
      ${departments.map(d=>`<button data-dept="${d.code}" class="${deptFilter===d.code?'on':''}">${esc(d.system)}</button>`).join('')}</div>
     <input id="search" type="search" placeholder="Search activity, defect or section" aria-label="Search backlog" value="${esc(filter)}"></div></div>
-  ${table(['Work order','Section','Due','Duration','Priority',''],rows.slice(0,60).flatMap(r=>{
+  ${table(['Work order','Section','Due','Failure risk','Duration','Priority',''],rows.slice(0,60).flatMap(r=>{
    const p=priorityOf(r,state.date),od=overdueOf(r,state.date),open=expanded===r.id;
+   const rk=riskOf(r,state.date),rb=riskBand(rk);
    return [`<tr class="${open?'open':''}"><td><strong>${esc(r.title)}</strong>
      <small>${esc(r.id)} · ${esc(r.asset)} · ${esc(dept(r.department).system)}</small>
      ${r.defect?`<small class="defect">⚠ ${esc(r.defect)} · severity ${r.severity}</small>`:''}</td>
     <td>${esc(section(r.section).code)}<small>${esc(lineLabel(r.line))}</small></td>
     <td class="num">${od>0?`<b class="late">${od}d late</b>`:`in ${-od}d`}<small>every ${r.periodicity}d</small></td>
+    <td class="num">${(rk*100).toFixed(0)}%<small class="${rb==='High'?'late':''}">${rb} · ${(consequenceOf(r)*100).toFixed(0)}% consequence</small></td>
     <td class="num">${r.duration} min<small>+${dept(r.department).setup}/${dept(r.department).clearance}</small></td>
     <td>${r.emergency?badge('Emergency','red'):''}${badge(`${p} ${band(p)}`,bandKind(band(p)))}${r.status!=='Pending'?badge(r.status,'green'):''}</td>
     <td><button class="text" data-explain="${esc(r.id)}">${open?'Hide':'Why?'}</button></td></tr>`,
-    open?`<tr class="drivers"><td colspan="6">${driverBars(r)}</td></tr>`:''];}))}
+    open?`<tr class="drivers"><td colspan="7">${driverBars(r)}</td></tr>`:''];}))}
   ${rows.length>60?`<div class="panel-foot">Showing the 60 highest-priority of ${rows.length}. Narrow with search or department.</div>`:''}</section>`;
 }
 

@@ -76,6 +76,36 @@ DEFECTS = {
     'Isolator':       ['Contact heating'],
 }
 
+# How readily a class of asset develops a reportable defect once it is worn,
+# independent of how bad the consequence would be. Probability and consequence
+# are deliberately separate: a bridge fails rarely and expensively, a track
+# circuit fails often and cheaply.
+FRAGILITY = {
+    'Rail': 0.80, 'Track geometry': 0.70, 'Points': 0.85, 'Ballast': 0.40,
+    'Welds': 0.75, 'Bridge': 0.30, 'Curve': 0.60, 'Level crossing': 0.65,
+    'Point machine': 0.80, 'Signal': 0.70, 'Track circuit': 0.90,
+    'Axle counter': 0.75, 'Interlocking': 0.50, 'OHE': 0.70,
+    'Insulator': 0.60, 'Contact wire': 0.75, 'Neutral section': 0.65,
+    'Isolator': 0.60, 'Earthing': 0.45,
+}
+
+
+def solve(M, k):
+    """Gauss-Jordan with partial pivoting on an augmented k x (k+1) matrix."""
+    M = [row[:] for row in M]
+    for col in range(k):
+        pr = max(range(col, k), key=lambda r: abs(M[r][col]))
+        M[col], M[pr] = M[pr], M[col]
+        pv = M[col][col]
+        if abs(pv) < 1e-12:
+            continue
+        M[col] = [v / pv for v in M[col]]
+        for r in range(k):
+            if r != col and M[r][col]:
+                f = M[r][col]
+                M[r] = [a - f * b for a, b in zip(M[r], M[col])]
+    return [M[i][k] for i in range(k)]
+
 
 def load_corridor():
     src = io.open(os.path.join(DIST, 'corridor.js'), encoding='utf-8').read()
@@ -138,8 +168,83 @@ def main():
                     'severity': severity,
                     'criticality': crit,
                     'traffic': round(trafficn, 3),
+                    'class': klass,
+                    'elapsedDays': elapsed,
                     'status': 'Pending',
                 })
+
+    # ---- hazard model ----------------------------------------------------
+    # P(this asset develops a reportable defect before its next window).
+    # Probability only. Consequence is a separate quantity and is combined with
+    # this one downstream, so the two can be argued about separately.
+    HNAMES = ['Wear against periodicity', 'Section traffic density',
+              'Wear under traffic', 'Asset class fragility']
+
+    def hfeatures(wear, traffic, fragility):
+        w = max(0.0, min(3.0, wear))
+        return [w, traffic, w * traffic, fragility]
+
+    # Synthetic cycles: an asset is carried to some point in its periodicity on
+    # a section of some traffic density, and either develops a defect or does not.
+    h_true = [1.35, 0.80, 0.95, 1.60]
+    h_b0 = -4.80
+    h_rows = []
+    for _ in range(6000):
+        wear = rng.triangular(0.1, 2.4, 0.9)
+        traffic = rng.uniform(0.15, 1.0)
+        fragility = rng.choice(list(FRAGILITY.values()))
+        x = hfeatures(wear, traffic, fragility)
+        z = h_b0 + sum(c * v for c, v in zip(h_true, x)) + rng.gauss(0, 0.45)
+        h_rows.append((x, 1 if rng.random() < 1.0 / (1.0 + math.exp(-z)) else 0))
+
+    cut = int(0.8 * len(h_rows))
+    h_train, h_test = h_rows[:cut], h_rows[cut:]
+
+    # Logistic regression by Newton-Raphson (IRLS), ridge-penalised.
+    hk = len(HNAMES) + 1
+    hcoef = [0.0] * hk
+    for _ in range(25):
+        H = [[0.0] * hk for _ in range(hk)]
+        g = [0.0] * hk
+        for x, y in h_train:
+            v = [1.0] + x
+            z = sum(c * a for c, a in zip(hcoef, v))
+            pr = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+            w = max(pr * (1.0 - pr), 1e-6)
+            for i in range(hk):
+                g[i] += (y - pr) * v[i]
+                for j in range(hk):
+                    H[i][j] += w * v[i] * v[j]
+        for i in range(1, hk):
+            H[i][i] += 1e-3
+            g[i] -= 1e-3 * hcoef[i]
+        step = solve([H[i][:] + [g[i]] for i in range(hk)], hk)
+        hcoef = [c + d for c, d in zip(hcoef, step)]
+        if max(abs(d) for d in step) < 1e-8:
+            break
+    hcoef = [round(c, 4) for c in hcoef]
+
+    def hprob(x):
+        z = sum(c * a for c, a in zip(hcoef, [1.0] + x))
+        return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+
+    # Held-out discrimination and calibration. RMSE means nothing for a
+    # classifier; AUC says whether the ordering is right, Brier whether the
+    # probabilities themselves are honest.
+    pos = [hprob(x) for x, y in h_test if y == 1]
+    neg = [hprob(x) for x, y in h_test if y == 0]
+    wins = sum(1 for a in pos for b in neg if a > b) + \
+           0.5 * sum(1 for a in pos for b in neg if a == b)
+    auc = wins / (len(pos) * len(neg)) if pos and neg else 0.5
+    brier = sum((hprob(x) - y) ** 2 for x, y in h_test) / len(h_test)
+    h_mean = [sum(x[i] for x, _ in h_train) / len(h_train) for i in range(len(HNAMES))]
+    base = sum(y for _, y in h_train) / len(h_train)
+
+    # Score every work order on the register with it.
+    for r in requests:
+        x = hfeatures(r['elapsedDays'] / max(r['periodicity'], 1),
+                      r['traffic'], FRAGILITY.get(r['class'], 0.5))
+        r['risk'] = round(hprob(x), 4)
 
     # ---- priority model -------------------------------------------------
     # Features, all scaled to roughly 0-1 so the fitted weights are comparable.
@@ -147,23 +252,23 @@ def main():
         return [
             max(-1.0, min(3.0, r['overdueDays'] / max(r['periodicity'], 1) * 4)),
             r['severity'] / 4.0,
-            r['criticality'],
-            r['traffic'],
+            r['risk'],
             r['criticality'] * r['traffic'],
         ]
 
     NAMES = ['Overdue against periodicity', 'Reported defect severity',
-             'Asset criticality', 'Section traffic density',
-             'Consequence of failure']
+             'Predicted failure risk', 'Consequence of failure']
 
     # Synthetic history: how a division actually ordered comparable work, with
     # noise standing in for judgement the features do not capture.
-    truth = [26.0, 24.0, 16.0, 9.0, 14.0]
+    truth = [18.0, 20.0, 24.0, 16.0]
     hist = []
     for _ in range(4000):
         r = {'overdueDays': rng.randint(-21, 260), 'periodicity': rng.choice([30, 90, 180, 365, 730, 1460]),
              'severity': rng.choices([0, 1, 2, 3, 4], weights=[55, 15, 14, 11, 5])[0],
              'criticality': rng.uniform(0.55, 0.95), 'traffic': rng.uniform(0.2, 1.0)}
+        wear = max(0.0, r['overdueDays']) / max(r['periodicity'], 1) + rng.uniform(0.30, 1.70)
+        r['risk'] = hprob(hfeatures(wear, r['traffic'], rng.choice(list(FRAGILITY.values()))))
         x = features(r)
         y = 12.0 + sum(c * v for c, v in zip(truth, x)) + rng.gauss(0, 4.5)
         hist.append((x, max(0.0, min(100.0, y))))
@@ -220,6 +325,26 @@ def main():
         'export const TRAINED_ON=%d;\n' % len(hist)
     )
 
+    io.open(os.path.join(DIST, 'hazard.js'), 'w', encoding='utf-8').write(
+        '// GENERATED by tools/build_backlog.py - do not edit by hand.\n'
+        '// Logistic hazard model: P(this asset develops a reportable defect\n'
+        '// before its next maintenance window). Probability only - consequence\n'
+        '// is a separate quantity, combined downstream.\n'
+        '// Fitted by Newton-Raphson (IRLS) on %d synthetic asset cycles.\n'
+        '// Held out: AUC %.3f, Brier %.4f, base rate %.3f.\n'
+        '// In log-odds the exact per-feature attribution is\n'
+        '// coefficient x (feature - training mean), which is what explainRisk() returns.\n'
+        % (len(h_train), auc, brier, base) +
+        'export const HFEATURES=%s;\n' % json.dumps(HNAMES, ensure_ascii=False) +
+        'export const HCOEF=%s;\n' % json.dumps(hcoef) +
+        'export const HMEAN=%s;\n' % json.dumps([round(m, 4) for m in h_mean]) +
+        'export const FRAGILITY=%s;\n' % json.dumps(FRAGILITY, ensure_ascii=False) +
+        'export const AUC=%.3f;\n' % auc +
+        'export const BRIER=%.4f;\n' % brier +
+        'export const BASE_RATE=%.3f;\n' % base +
+        'export const HAZARD_TRAINED_ON=%d;\n' % len(h_train)
+    )
+
     banner = ('// GENERATED by tools/build_backlog.py - do not edit by hand.\n'
               '// SYNTHETIC maintenance backlog. Activity classes and periodicity bands\n'
               '// follow Permanent Way / S&T / Traction Distribution practice; traffic\n'
@@ -240,7 +365,11 @@ def main():
 
     overdue = sum(1 for r in requests if r['overdueDays'] > 0)
     defects = sum(1 for r in requests if r['severity'])
-    print('wrote dist/backlog.js and dist/priority.js')
+    print('wrote dist/backlog.js, dist/priority.js and dist/hazard.js')
+    print('  hazard AUC %.3f   Brier %.4f   base rate %.3f   coefficients:' % (auc, brier, base))
+    print('    intercept %7.3f' % hcoef[0])
+    for n, c in zip(HNAMES, hcoef[1:]):
+        print('    %-28s %7.3f' % (n, c))
     print('  assets %d   backlog %d   overdue %d   with defects %d'
           % (len(assets), len(requests), overdue, defects))
     print('  model RMSE %.2f   coefficients:' % rmse)

@@ -1,6 +1,8 @@
 import {sections,lines,trains,corridorWindows} from './corridor.js';
 import {PLANNING_DATE,departments,resources,assets,backlog} from './backlog.js';
 import {score as priorityScore} from './priority-model.js';
+import {failureRisk,riskBand} from './hazard-model.js';
+export {riskBand};
 export {sections,lines,trains,corridorWindows,departments,resources,assets,PLANNING_DATE};
 
 // A corridor block is a sanctioned window in which traffic is regulated. It is
@@ -72,7 +74,13 @@ export function sequence(tasks,start){
 }
 
 export const overdueOf=(r,date)=>r.overdueDays+daysBetween(PLANNING_DATE,date);
-export const priorityOf=(r,date)=>priorityScore({...r,overdueDays:overdueOf(r,date)});
+// An asset keeps wearing while it waits, so the hazard is recomputed for the
+// date being planned rather than read off the figure baked in at build time.
+export const riskOf=(r,date)=>failureRisk({...r,
+ elapsedDays:(r.elapsedDays??((r.periodicity||1)+(r.overdueDays??0)))+daysBetween(PLANNING_DATE,date)});
+export const consequenceOf=r=>(r.criticality??0.7)*(r.traffic??0.5);
+export const priorityOf=(r,date)=>priorityScore({...r,
+ overdueDays:overdueOf(r,date),risk:riskOf(r,date)});
 export const band=p=>p>=70?'Critical':p>=55?'High':p>=40?'Medium':'Low';
 
 export function demo(){

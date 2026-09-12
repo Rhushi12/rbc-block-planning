@@ -2,12 +2,12 @@
 // Ridge-regularised linear model fitted to 4000 historical prioritisation
 // decisions. The history is SYNTHETIC pending access to real TMS/SMMS/TDMS
 // records; the feature set and the inference path are the deliverable.
-// Holdout RMSE 6.72 priority points on a 0-100 scale.
+// Holdout RMSE 4.57 priority points on a 0-100 scale.
 // For a linear model the exact per-feature attribution is
 // coefficient x (feature - training mean), which is what explain() returns.
-export const FEATURES=["Overdue against periodicity", "Reported defect severity", "Asset criticality", "Section traffic density", "Consequence of failure"];
-export const COEF=[28.0467, 19.3202, 15.2107, 8.057, 4.718, 9.2569];
-export const MEAN=[1.5641, 0.2389, 0.7488, 0.5992, 0.4495];
-export const RMSE=6.72;
-export const SCALE=[28.217, 115.216];
+export const FEATURES=["Overdue against periodicity", "Reported defect severity", "Predicted failure risk", "Consequence of failure"];
+export const COEF=[14.4257, 17.8013, 16.7473, 20.2196, 14.6221];
+export const MEAN=[1.5552, 0.2358, 0.4722, 0.4452];
+export const RMSE=4.57;
+export const SCALE=[12.127, 109.461];
 export const TRAINED_ON=4000;

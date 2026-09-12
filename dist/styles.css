@@ -266,3 +266,8 @@ dialog h2{font-size:1.2rem;margin:0 28px 16px 0}
  color:#7f97a5;border:1px solid #24414f;border-radius:6px;padding:5px 9px;margin-bottom:10px;
  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .assist-chip.on{color:#7fd3c8;border-color:#1d5a54;background:#12313400}
+
+/* two fitted models, shown as two things rather than one */
+.model-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px}
+.drivers-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:900px){.model-grid,.drivers-grid{grid-template-columns:1fr}}

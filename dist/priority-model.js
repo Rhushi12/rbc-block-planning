@@ -1,13 +1,19 @@
 import {FEATURES,COEF,MEAN,RMSE,SCALE,TRAINED_ON} from './priority.js';
+import {failureRisk} from './hazard-model.js';
 export {FEATURES,RMSE,TRAINED_ON};
 
 // Feature vector, mirroring tools/build_backlog.py exactly. Change one, change both.
+//
+// Four things that do not say each other: how late the work is, what is already
+// reported wrong with it, how likely the asset is to fail before its next
+// window, and what that failure would cost. Criticality and traffic used to sit
+// here on their own as well; carrying them twice made the fit collinear and
+// pushed the risk coefficient negative, which is worse than not having it.
 export function featurise(r){
  return [
   Math.max(-1,Math.min(3,(r.overdueDays??0)/Math.max(r.periodicity||1,1)*4)),
   (r.severity??0)/4,
-  r.criticality??0.7,
-  r.traffic??0.5,
+  r.risk??failureRisk(r),
   (r.criticality??0.7)*(r.traffic??0.5),
  ];
 }
