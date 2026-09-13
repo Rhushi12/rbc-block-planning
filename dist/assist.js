@@ -27,7 +27,7 @@ export async function probeAssist() {
 }
 
 // Every call is on a deadline: a model thinking too long must not freeze a demo.
-export async function callAssist(route, body, ms = 45000) {
+export async function callAssist(route, body, ms = 120000) {
  let res;
  try {
   res = await fetch('/api/assist/' + route, {

@@ -91,14 +91,14 @@ def write_templates(directory):
         print('wrote %s  (%s)' % (os.path.join(directory, name), spec['note']))
 
 
-def validate(directory, required_files=None):
+def validate(directory, required_files=None, warnings=None):
     """Check an extract against the contract. Returns {filename: [rows]}.
 
     Reports every problem it finds rather than stopping at the first, because a
     division sending an extract deserves one list of corrections, not five
     rounds of trial and error.
     """
-    problems, loaded = [], {}
+    problems, cautions, loaded = [], [], {}
     wanted = required_files or list(SCHEMA)
 
     for name in wanted:
@@ -178,8 +178,10 @@ def validate(directory, required_files=None):
         if rows and found in (0, len(rows)):
             problems.append('cycles.csv: every row has the same defect_found value, '
                             'so a hazard model cannot be fitted from it.')
+        # A caution, not a refusal: a small real history is still better than a
+        # large generated one, as long as the result is reported as indicative.
         if 0 < len(rows) < 200:
-            problems.append('cycles.csv: %d rows. A hazard model fitted on fewer than '
+            cautions.append('cycles.csv: %d rows. A hazard model fitted on fewer than '
                             'a few hundred cycles should not be trusted; report it as '
                             'indicative.' % len(rows))
 
@@ -210,8 +212,10 @@ def validate(directory, required_files=None):
                 problems.append('windows.csv: choice set %s has one candidate, so it '
                                 'carries no information about the tradeoff.' % sid)
 
+    if warnings is not None:
+        warnings.extend(cautions)
     if problems:
-        raise RecordError('\n'.join('  - ' + p for p in problems))
+        raise RecordError('\n'.join('  - ' + p for p in problems + cautions))
     return loaded
 
 
@@ -226,13 +230,16 @@ def main():
         write_templates(args.template)
         return 0
     if args.check:
+        warnings = []
         try:
-            loaded = validate(args.check)
+            loaded = validate(args.check, warnings=warnings)
         except RecordError as e:
             print('This extract does not meet the contract:\n%s' % e)
             return 1
         for name, rows in loaded.items():
             print('ok  %-16s %d rows' % (name, len(rows)))
+        for w in warnings:
+            print('warning: %s' % w)
         print('\nExtract accepted. Refit with:')
         print('  python tools/build_backlog.py --records %s' % args.check)
         print('  python tools/build_weights.py --records %s' % args.check)

@@ -9,6 +9,8 @@ coverage/
 Thumbs.db
 .cache/
 test-results/
+__pycache__/
+*.pyc
 # dist contains authored source; keep it tracked.
 
 # Bulk source data for tools/build_corridor.py — download from

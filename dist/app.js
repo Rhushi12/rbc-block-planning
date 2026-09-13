@@ -98,9 +98,62 @@ function ribbon(sectionId,line,date){
  const cells=load.map((n,i)=>{
   const cls=blocked[i]?'b':n?'t':win[i]?'w':'';
   const shade=n?0.25+0.75*(n/peak):1;
-  return `<i class="${cls}"${n&&!blocked[i]?` style="opacity:${shade.toFixed(2)}"`:''}></i>`;
+  return `<i class="${cls}" data-i="${i}"${n&&!blocked[i]?` style="opacity:${shade.toFixed(2)}"`:''}></i>`;
  }).join('');
- return `<div class="ribbon" role="img" aria-label="${legs.length} trains on ${esc(sectionId)} ${esc(line)} line, busiest half hour ${peak} trains">${cells}</div>`;
+ return `<div class="ribbon" data-section="${esc(sectionId)}" data-line="${esc(line)}" role="img" aria-label="${legs.length} trains on ${esc(sectionId)} ${esc(line)} line, busiest half hour ${peak} trains">${cells}</div>`;
+}
+
+// Hover details for one half-hour cell. Worked out from the same rules the
+// ribbon paints with, so a tooltip can never disagree with the colour under it.
+const covers=(start,end,i)=>{
+ for(let m=start;m<end;m+=CELL)if(Math.floor((m%1440)/CELL)===i)return true;
+ return false;
+};
+const trainCache=new WeakMap();
+function trainsOn(sectionId,line){
+ let idx=trainCache.get(state.trains);
+ if(!idx){
+  idx=new Map();
+  for(const t of state.trains)for(const l of trainLegs(t)){
+   const k=`${l.section}|${l.line}`;
+   if(!idx.has(k))idx.set(k,[]);
+   idx.get(k).push({id:t.id,name:t.name,delay:t.delay||0,start:l.start,end:l.end});
+  }
+  for(const list of idx.values())list.sort((a,b)=>a.start-b.start);
+  trainCache.set(state.trains,idx);
+ }
+ return idx.get(`${sectionId}|${line}`)||[];
+}
+export function cellDetails(sectionId,line,i,date=state.date){
+ const from=i*CELL;
+ const here=trainsOn(sectionId,line).filter(l=>
+  Math.max(0,Math.floor(l.start/CELL))<=i&&i<=Math.min(CELLS-1,Math.floor(Math.min(l.end,1439)/CELL)));
+ const windows=corridorWindows.filter(c=>c.line===line&&c.minutes===240&&covers(c.start,c.end,i));
+ const blocks=state.blocks.filter(b=>b.date===date&&b.section===sectionId&&
+  (b.line===null||b.line===line)&&covers(b.start,b.end,i));
+ return {
+  kind:blocks.length?'b':here.length?'t':windows.length?'w':'',
+  title:`${section(sectionId)?.code||sectionId} · ${line} line`,
+  when:`${time(from)}–${time(from+CELL)}`,
+  blocks:blocks.map(b=>({window:`${time(b.start)}–${time(b.end)}`,orders:b.taskIds.length,by:b.approvedBy||'—'})),
+  trains:here.map(l=>({id:l.id,name:l.name,at:`${time(l.start)}–${time(l.end)}`,delay:l.delay})),
+  windows:windows.map(c=>({window:`${time(c.start)}–${time(c.end)}`,minutes:c.minutes,regulates:c.trainsAffected})),
+ };
+}
+function tipHtml(d){
+ const plural=(n,w)=>`${n} ${w}${n===1?'':'s'}`;
+ const out=[`<div class="tip-head"><strong>${esc(d.title)}</strong><span>${d.when}</span></div>`];
+ for(const b of d.blocks)
+  out.push(`<div class="tip-row b"><i></i><div><b>Approved block ${b.window}</b><small>${plural(b.orders,'work order')} · approved by ${esc(b.by)}</small></div></div>`);
+ if(d.trains.length)
+  out.push(`<div class="tip-row t"><i></i><div><b>${plural(d.trains.length,'train')} in this half hour</b>${
+   d.trains.slice(0,4).map(t=>`<small>${esc(t.id)} ${esc(t.name)} · ${t.at}${t.delay?` · ${t.delay} min late`:''}</small>`).join('')}${
+   d.trains.length>4?`<small>+${d.trains.length-4} more</small>`:''}</div></div>`);
+ for(const w of d.windows)
+  out.push(`<div class="tip-row w"><i></i><div><b>Sanctioned corridor window ${w.window}</b><small>${w.minutes} min · granting it regulates ${plural(w.regulates,'train')}</small></div></div>`);
+ if(!d.kind)
+  out.push(`<div class="tip-row free"><i></i><div><b>Free</b><small>No train booked on this line in this half hour</small></div></div>`);
+ return out.join('');
 }
 function corridorStrip(date){
  return `<div class="strip">
@@ -119,8 +172,9 @@ function dashboard(){
  <div class="kpis">${kpis().map(([n,t,s])=>`<article class="kpi"><span>${t}</span><strong>${n}</strong><small>${esc(s)}</small></article>`).join('')}</div>
  <section class="panel"><div class="panel-head"><div><h2>Corridor occupancy</h2>
    <p>${trains.length} timetabled trains · ${trains.reduce((n,t)=>n+trainLegs(t).length,0)} section legs · ${esc(state.date)}</p></div>
-   <div class="legend"><i class="blue"></i>Train <i class="amber"></i>Sanctioned window <i class="green"></i>Approved block</div></div>
+   <div class="legend"><span data-legend="t"><i class="blue"></i>Train</span><span data-legend="w"><i class="amber"></i>Sanctioned window</span><span data-legend="b"><i class="green"></i>Approved block</span></div></div>
   ${corridorStrip(state.date)}
+  <div id="strip-tip" class="strip-tip" role="tooltip" hidden></div>
   <div class="panel-foot">Each section carries an UP and a DN running line. A block closes one line; traffic continues on the other.</div></section>
  <div class="two-col">
   <section class="panel"><div class="panel-head"><h2>Highest priority work</h2>
@@ -383,6 +437,7 @@ function modalContent(){
      ${assistDraft.assumptions.length
        ?`<ul>${assistDraft.assumptions.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>`
        :'<p>Nothing was inferred beyond what the note says.</p>'}
+     ${assistDraft.warnings?.length?`<div class="warn-box">${assistDraft.warnings.map(w=>`<p>${esc(w)}</p>`).join('')}</div>`:''}
      ${assistDraft.errors?.length?`<div class="err">${assistDraft.errors.map(e=>`<p>${esc(e)}</p>`).join('')}</div>`:''}
     </div>`:''}</div>`:''}
   <label>Activity<input name="title" required maxlength="120" value="${esc(d.title||'')}" placeholder="e.g. Ultrasonic rail flaw testing"></label>
@@ -555,6 +610,8 @@ document.addEventListener('click',e=>{
    assistDraft=await callAssist('intake',{text:assistNoteText,state:snapshot()});
    notice=assistDraft.errors?.length
     ?'Draft filled in, but it does not pass intake validation yet. Correct the fields below.'
+    :assistDraft.warnings?.length
+    ?'Draft filled in, but it disagrees with the asset register. Check the flagged fields.'
     :`Draft filled in by ${assistDraft.model}. Check every field, then add it yourself.`;});
   return;}
  if(a==='explain-issues'){
@@ -568,6 +625,27 @@ document.addEventListener('click',e=>{
  if(a==='clear-delays'){state.delays=[];retime();result=null;save();
   notice='Running delays cleared. The plan is back on the booked timetable.';render();}
 });
+
+// Dashboard strip: details for the half hour under the pointer, and a legend
+// entry lights up only its own colour.
+let stripFocus='';
+document.addEventListener('mouseover',e=>{
+ const t=e.target;
+ const legend=t.closest?.('[data-legend]')?.dataset.legend||'';
+ const strip=document.querySelector('.strip');
+ if(strip&&legend!==stripFocus){stripFocus=legend;strip.dataset.focus=legend;}
+ const tip=document.querySelector('#strip-tip');
+ if(!tip)return;
+ const cell=t.closest?.('.ribbon i');
+ if(!cell){tip.hidden=true;return;}
+ const r=cell.parentElement.dataset;
+ tip.innerHTML=tipHtml(cellDetails(r.section,r.line,Number(cell.dataset.i)));
+ tip.hidden=false;
+ const box=cell.getBoundingClientRect(),w=tip.offsetWidth,h=tip.offsetHeight;
+ tip.style.left=`${Math.max(8,Math.min(box.left+box.width/2-w/2,window.innerWidth-w-8))}px`;
+ tip.style.top=`${box.top-h-10<8?box.bottom+10:box.top-h-10}px`;
+});
+window.addEventListener('scroll',()=>{const tip=document.querySelector('#strip-tip');if(tip)tip.hidden=true;},{passive:true});
 
 document.addEventListener('input',e=>{
  if(e.target.id==='search'){

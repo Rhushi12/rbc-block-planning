@@ -17,7 +17,7 @@ Node.js 20 or newer. From this folder:
 
 ```sh
 npm start          # http://127.0.0.1:5173
-npm test           # 53 tests
+npm test           # 58 tests
 npm run check      # syntax check every module
 ```
 
@@ -258,7 +258,9 @@ None of these bypass the gate. Each one re-runs it.
 ## Five-minute demonstration
 
 1. **Dashboard** — 144 pending orders over 228 assets. The occupancy strip shows why this is
-   hard: every half hour of both running lines, shaded by train count.
+   hard: every half hour of both running lines, shaded by train count. Hover any cell for the
+   trains, sanctioned window or approved block behind it; hover a legend entry to light up only
+   that colour.
 2. **Maintenance Backlog** — ranked by the model. Open **Why?** on the top order to see the
    exact per-feature attribution behind its score.
 3. **Block Plan** — choose **Week**, generate. 44 blocks covering 138 orders in ~250 ms.
@@ -271,9 +273,11 @@ None of these bypass the gate. Each one re-runs it.
 
 ### Other things worth showing
 
-- **The gate has the last word.** Generate a plan, then add trains or take a department off
-  duty in **Departments**, and approve a stale recommendation. Approval re-runs every hard
-  rule and rejects it; the attempt is logged in **Safety Alerts**.
+- **The gate has the last word.** Approve a block that sits in a natural gap rather than a
+  corridor block, then in **Corridor & Traffic** delay a train that runs just before it on that
+  section and line. The approved block is re-checked immediately and raised in **Safety
+  Alerts**. Changing traffic or departments discards the current plan, so every new
+  recommendation is generated against the data it will be approved under.
 - **Crew strength is a real constraint.** Drop Engineering to one crew and regenerate — blocks
   that used to run in parallel across sections serialise.
 - **Traffic cost is visible.** Corridor blocks carry the number of trains regulated, on the
@@ -364,7 +368,8 @@ tools/build_weights.py  refits the planner objective from recorded window choice
 tools/real_records.py   the contract a real TMS/SMMS/TDMS extract must meet, and its validator
 tools/records-template/ blank CSVs a division can fill in
 tests/planner.test.mjs  49 tests over the planner, the gate and the models
-tests/render.test.mjs   4 tests that render the interface without a browser
+tests/render.test.mjs   5 tests that render the interface without a browser
+tests/assist.test.mjs   4 tests over the assistant's deterministic checks, no model needed
 ```
 
 `dist/` is authored source and is committed. There is no build step for the app itself; the
